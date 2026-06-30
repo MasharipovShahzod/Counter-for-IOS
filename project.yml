@@ -1,0 +1,47 @@
+# XcodeGen spec — generates FitnessTracker.xcodeproj on the macOS CI runner.
+# (XcodeGen builds the .xcodeproj from this file so we never hand-edit project XML.)
+name: FitnessTracker
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  FitnessTracker:
+    type: application
+    platform: iOS
+    sources:
+      - path: ExerciseTracker
+        excludes:
+          # Redundant UIKit example — the SwiftUI app replaces it.
+          - "Example+CameraWiring.swift"
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: Fitness Tracker
+        # Required — the app crashes on camera start without this.
+        NSCameraUsageDescription: Used to count your push-ups and squats.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - armv7
+          - front-facing-camera
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.fitnesstracker
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"   # iPhone only
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+
+schemes:
+  FitnessTracker:
+    build:
+      targets:
+        FitnessTracker: all
+    archive:
+      config: Release
