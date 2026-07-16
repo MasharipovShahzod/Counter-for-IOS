@@ -21,7 +21,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          # The runner image preinstalls aws/tap, which Homebrew's tap-trust
+          # check refuses to read and then warns about at length on every run.
+          # We never use it, and the noise buries real errors — drop it.
+          brew untap aws/tap 2>/dev/null || true
+          brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -29,12 +34,36 @@ jobs:
       # Runs before the build so a logic regression fails fast, and because the
       # build below targets `iphoneos` (a device SDK) which cannot run tests —
       # tests need a simulator destination.
+      #
+      # THE DESTINATION IS RESOLVED, NOT HARDCODED.
+      # This step used to pin `name=iPhone 15`, and broke the moment the macos-14
+      # image shipped an Xcode whose bundled runtimes start at the iPhone 16
+      # family: the simulator simply wasn't there any more. That failure is
+      # nastier than it sounds, because xcodebuild reports an unmatched
+      # destination as exit 74 (EX_IOERR) — an "I/O error", which reads like a
+      # broken runner rather than "that device does not exist". Asking the
+      # runner what it actually has costs one command and cannot go stale.
       - name: Run unit tests
         run: |
+          set -eo pipefail
+
+          # Logged on every run: when this step does fail, the first question is
+          # always "what was available?" — so answer it up front.
+          xcrun simctl list devices available
+
+          DEVICE_ID=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices[][] | select(.name | test("^iPhone"))] | .[0].udid // empty')
+
+          if [ -z "$DEVICE_ID" ]; then
+            echo "::error::No iPhone simulator available on this runner image."
+            exit 1
+          fi
+          echo "Testing on simulator $DEVICE_ID"
+
           xcodebuild test \
             -project FitnessTracker.xcodeproj \
             -scheme FitnessTracker \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -destination "id=$DEVICE_ID" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Build (unsigned)
