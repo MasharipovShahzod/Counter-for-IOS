@@ -68,12 +68,23 @@ public enum IntegrityThreat: CustomStringConvertible {
 /// Инвариант: `maskedValue == realValue ^ salt ^ canary` всегда.
 /// После каждого чтения/записи оба ключа заменяются новыми случайными значениями,
 /// поэтому адрес «настоящего числа» в памяти постоянно мигрирует.
+///
+/// ПОТОКОБЕЗОПАСНОСТЬ
+/// ------------------
+/// Все операции проходят через `lock`. Раньше замка не было вовсе, хотя
+/// комментарий обещал атомарность: любые два потока, одновременно оказавшиеся
+/// внутри ротации ключей, ломали инвариант выше и превращали счётчик в мусор.
+/// Самое неприятное в этом — не потерянный инкремент, а то, что `safeValue()`
+/// затем опознаёт разрушенное состояние как «вмешался редактор памяти» и
+/// обвиняет честного пользователя в читерстве по следам нашей же гонки.
 public final class ObfuscatedCounter {
 
     // Все три поля живут рядом в памяти, но их XOR — это случайный мусор для сканера.
     private var maskedValue: UInt64
     private var salt:        UInt64
     private var canary:      UInt64
+
+    private let lock = NSLock()
 
     public init(initialValue: Int = 0) {
         salt   = Self.randomUInt64()
@@ -83,9 +94,16 @@ public final class ObfuscatedCounter {
 
     // MARK: Доступ к значению
 
-    /// Декодирует и возвращает счётчик, затем ротирует ключи.
-    /// Для reference-type (class) изменение self в getter допустимо в Swift.
-    public var value: Int {
+    /// Декодирует и возвращает счётчик, ПОПУТНО ротируя ключи.
+    ///
+    /// Это метод, а не свойство, и назван `consume` намеренно: операция мутирует
+    /// объект. Раньше здесь стояло `public var value`, и вызов вида
+    /// `ledger.record(repIndex: counter.value)` читался как безобидное чтение,
+    /// хотя перезаписывал `salt`, `canary` и `maskedValue`. Скрытая мутация за
+    /// геттером — ровно та ошибка, которую невозможно заметить на месте вызова.
+    public func consumeValue() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
         let raw = maskedValue ^ salt ^ canary
         rotateMask(preserving: raw)
         return Int(truncatingIfNeeded: raw)
@@ -93,6 +111,8 @@ public final class ObfuscatedCounter {
 
     /// Устанавливает новое значение и генерирует свежую пару ключей.
     public func setValue(_ newValue: Int) {
+        lock.lock()
+        defer { lock.unlock() }
         salt   = Self.randomUInt64()
         canary = Self.randomUInt64()
         maskedValue = UInt64(bitPattern: Int64(newValue)) ^ salt ^ canary
@@ -100,10 +120,26 @@ public final class ObfuscatedCounter {
 
     /// Атомарно инкрементирует, ротируя ключи до и после операции.
     public func increment() {
+        lock.lock()
+        defer { lock.unlock() }
         let current = maskedValue ^ salt ^ canary
         salt   = Self.randomUInt64()
         canary = Self.randomUInt64()
         maskedValue = (current &+ 1) ^ salt ^ canary
+    }
+
+    /// Инкрементирует и возвращает НОВОЕ значение одной атомарной операцией.
+    ///
+    /// Существует потому, что `increment()` + `consumeValue()` — это две
+    /// операции с окном между ними: два засчитанных повтора подряд могли
+    /// записать в реестр один и тот же индекс, а хэш-цепочка построена на
+    /// монотонности индекса.
+    public func incrementAndGet() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let next = (maskedValue ^ salt ^ canary) &+ 1
+        rotateMask(preserving: next)
+        return Int(truncatingIfNeeded: next)
     }
 
     public func reset() { setValue(0) }
@@ -113,7 +149,12 @@ public final class ObfuscatedCounter {
     /// Декодирует счётчик и проверяет, что результат находится в допустимом диапазоне.
     /// Возвращает `nil` если ключи были обнулены или значение стало абсурдным —
     /// верный признак того, что редактор памяти вмешался в структуру.
+    ///
+    /// В отличие от `consumeValue()` НЕ мутирует состояние — это честное чтение,
+    /// пригодное для отрисовки счётчика в UI на каждом кадре.
     public func safeValue() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
         guard salt != 0, canary != 0 else { return nil }
         let raw = maskedValue ^ salt ^ canary
         let decoded = Int(truncatingIfNeeded: raw)

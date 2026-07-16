@@ -26,8 +26,10 @@ final class WorkoutViewController: UIViewController {
     private let sampleQueue = DispatchQueue(label: "com.exercisetracker.camera")
     private lazy var previewLayer = AVCaptureVideoPreviewLayer(session: session)
 
-    /// Which camera the user is using — drives the orientation we pass to Vision.
-    private var usingFrontCamera = true
+    /// Which camera the user is using — drives BOTH the orientation we pass to
+    /// Vision and `tracker.isFrontCamera`. Defaults to the BACK camera, which is
+    /// the framing the tracker is designed for.
+    private var usingFrontCamera = false
 
     // MARK: UI
 
@@ -39,6 +41,10 @@ final class WorkoutViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         tracker.delegate = self
+        // Must agree with the capture device and the orientation in
+        // `captureOutput` — nothing detects a mismatch at runtime.
+        tracker.isFrontCamera = usingFrontCamera
+        tracker.startSensors()
 
         // 1. GATE ON COMPATIBILITY before touching the camera.
         let compatibility = tracker.checkDeviceCompatibility()
@@ -56,6 +62,8 @@ final class WorkoutViewController: UIViewController {
         super.viewDidLayoutSubviews()
         previewLayer.frame = view.bounds
     }
+
+    deinit { tracker.stopSensors() }
 
     // MARK: Setup
 

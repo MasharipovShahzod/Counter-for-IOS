@@ -165,20 +165,38 @@ open FitnessTracker.xcodeproj
 
 ## Система безопасности
 
-### Использование `SecureWorkoutSession`
+> **Текущий статус: слои 1–2 активны, слои 3–4 выключены.**
+>
+> Приложение подключает защиту само — см. `WorkoutViewModel.startSecurity()` и
+> `makeSecurityConfiguration()`, где перечислено, что включено и почему.
+> Криптореестр (L3) и SSL-пиннинг (L4) выключены, потому что в
+> `SecurityConfiguration` пока стоят заглушки: хост `api.yourfitnessapp.com`,
+> `expectedTeamID = "ВАШЕ_TEAM_ID"`. `softMode` включён по той же причине.
+>
+> **Без серверной верификации счётчик остаётся словом клиента.** Слои 1–2
+> поднимают цену атаки, но не заменяют проверку на бэкенде. Порядок включения
+> расписан в доке к `makeSecurityConfiguration()`.
+
+### Использование `SecureWorkoutSession` напрямую
+
+Экран тренировки делает это сам; ручная сборка нужна, только если вы встраиваете
+трекер в свой UI.
 
 ```swift
 // 1. Создайте менеджер и сессию
 let tracker = ExerciseTrackerManager(exercise: .pushUp)
 let security = SecureWorkoutSession(configuration: SecurityConfiguration())
-tracker.secureSession = security
 
 // 2. Запустите сессию (ECDH handshake + предстартовые проверки)
 try await security.startSession()
 
-// 3. Тренировка идёт автоматически через делегат
+// 3. Подключайте к трекеру ТОЛЬКО после успешного старта: пока сессия неактивна,
+//    validateFrame отклоняет каждый кадр, и трекер читает это как потерю трекинга.
+tracker.secureSession = security
 
-// 4. Завершите и получите квитанцию сервера
+// 4. Тренировка идёт автоматически через делегат
+
+// 5. Завершите и получите квитанцию сервера
 let receipt = try await security.finishSession()
 print("Верифицировано повторений: \(receipt.verifiedRepCount)")
 ```

@@ -40,7 +40,9 @@ public enum SecuritySessionError: LocalizedError {
     case pinningViolation(PinningError)
     case cryptographicFailure(Error)
     case sessionNotStarted
+    case sessionAlreadyStarted
     case sessionAlreadyFinished
+    case verificationRequestFailed(statusCode: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -56,8 +58,12 @@ public enum SecuritySessionError: LocalizedError {
             return "ОШИБКА [L3]: \(e.localizedDescription)"
         case .sessionNotStarted:
             return "Сессия не запущена — вызовите startSession() сначала"
+        case .sessionAlreadyStarted:
+            return "Сессия уже запущена"
         case .sessionAlreadyFinished:
             return "Сессия уже завершена"
+        case .verificationRequestFailed(let code):
+            return "Сервер верификации ответил HTTP \(code)"
         }
     }
 }
@@ -157,22 +163,41 @@ public final class SecureWorkoutSession: @unchecked Sendable {
 
     // MARK: Сетевой слой (Layer 4)
 
-    private lazy var urlSession: URLSession = {
-        if configuration.enableSSLPinning {
-            return .pinnedSession(pinConfig: configuration.pinConfig) { [weak self] error in
-                guard let self else { return }
-                self.handleThreat(.pinningViolation(error))
-            }
-        }
-        return URLSession(configuration: .ephemeral)
-    }()
+    /// НЕ lazy: `deinit` обязан её инвалидировать, а обращение к lazy-свойству
+    /// из deinit создало бы сессию только ради того, чтобы тут же её закрыть.
+    private var urlSession: URLSession!
 
     // MARK: Управление жизненным циклом
 
-    private var isActive   = false
-    private var isBlocked  = false
-    private var isFinished = false
-    private var scanToken: ScanToken?
+    /// Защищает флаги жизненного цикла ниже.
+    ///
+    /// Класс объявлен `@unchecked Sendable` — то есть мы РУЧАЕМСЯ за
+    /// потокобезопасность вручную. До этого замка ручательство не было ничем
+    /// обеспечено: `_isActive`/`_isBlocked` читаются из visionQueue
+    /// (`validateFrame` на каждом кадре), пишутся из main (`startSession`,
+    /// `finishSession`) и из очереди делегата URLSession (`handleThreat` при
+    /// нарушении пиннинга).
+    private let stateLock = NSLock()
+    private var _isActive   = false
+    private var _isBlocked  = false
+    private var _isFinished = false
+    private var _isStarting = false
+    private var _scanToken: ScanToken?
+
+    /// Одно взятие замка на оба флага: между отдельными чтениями `isActive` и
+    /// `isBlocked` состояние успевало смениться.
+    private var canProcess: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _isActive && !_isBlocked
+    }
+
+    /// Сессия заблокирована сработавшим слоем защиты.
+    public var isBlocked: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _isBlocked
+    }
 
     // MARK: Инициализация
 
@@ -185,6 +210,28 @@ public final class SecureWorkoutSession: @unchecked Sendable {
             expectedTeamID: configuration.expectedTeamID,
             expectedBundleID: configuration.expectedBundleID
         )
+        // Все хранимые свойства инициализированы → `self` уже можно захватывать.
+        urlSession = Self.makeURLSession(configuration: configuration) { [weak self] error in
+            self?.handleThreat(.pinningViolation(error))
+        }
+    }
+
+    private static func makeURLSession(
+        configuration: SecurityConfiguration,
+        onViolation: @escaping @Sendable (PinningError) -> Void
+    ) -> URLSession {
+        guard configuration.enableSSLPinning else {
+            return URLSession(configuration: .ephemeral)
+        }
+        return .pinnedSession(pinConfig: configuration.pinConfig, onViolation: onViolation)
+    }
+
+    deinit {
+        // URLSession, созданная с делегатом, держит его СИЛЬНОЙ ссылкой до явной
+        // инвалидации — это документированное поведение Apple, а не догадка. Без
+        // этой строки и сессия, и `PinnedURLSessionDelegate` жили до конца
+        // процесса: одна протекшая пара на каждую тренировку.
+        urlSession?.finishTasksAndInvalidate()
     }
 
     // MARK: — Жизненный цикл сессии
@@ -199,12 +246,49 @@ public final class SecureWorkoutSession: @unchecked Sendable {
     ///
     /// - Throws: `SecuritySessionError` при обнаружении критической угрозы.
     public func startSession() async throws {
-        precondition(!isActive, "SecureWorkoutSession: попытка запустить уже активную сессию")
+        // Слот занимается атомарно. Раньше здесь стоял
+        // `precondition(!isActive, ...)` — то есть ПАДЕНИЕ релизной сборки на
+        // штатном пути жизненного цикла: SwiftUI волен вызвать `onAppear`
+        // повторно (возврат на экран, пересборка иерархии), и это не ошибка
+        // программиста, а обычное событие, которое надо просто отклонить.
+        stateLock.lock()
+        guard !_isActive, !_isStarting else {
+            stateLock.unlock()
+            throw SecuritySessionError.sessionAlreadyStarted
+        }
+        _isStarting = true
+        stateLock.unlock()
 
+        do {
+            try await runStartupSequence()
+        } catch {
+            // Слот освобождается на любом сбое, иначе повторная попытка
+            // (например, после восстановления сети) вечно упиралась бы в
+            // `sessionAlreadyStarted`.
+            stateLock.lock()
+            _isStarting = false
+            stateLock.unlock()
+            throw error
+        }
+
+        obfuscatedCounter.reset()
+        spoofingDetector.reset()
+
+        stateLock.lock()
+        _isStarting = false
+        _isActive   = true
+        _isBlocked  = false
+        _isFinished = false
+        stateLock.unlock()
+    }
+
+    /// Последовательность предстартовых проверок. Вынесена из `startSession`,
+    /// чтобы освобождение слота при сбое было ровно в одном месте.
+    private func runStartupSequence() async throws {
         // Layer 2 — предстартовое сканирование
         if configuration.enableProcessIntegrity {
             let threats = integrityGuard.runFullScan()
-            if !threats.isEmpty {
+            if !threats.isEmpty, !configuration.softMode {
                 throw SecuritySessionError.integrityCompromised(threats)
             }
         }
@@ -222,30 +306,33 @@ public final class SecureWorkoutSession: @unchecked Sendable {
 
         // Layer 2 — периодическое сканирование каждые N секунд
         if configuration.enableProcessIntegrity {
-            scanToken = integrityGuard.startPeriodicScan(
+            let token = integrityGuard.startPeriodicScan(
                 interval: configuration.integrityCheckInterval
             ) { [weak self] threats in
                 guard let self else { return }
                 self.handleThreat(.integrityCompromised(threats))
             }
+            stateLock.lock()
+            _scanToken = token
+            stateLock.unlock()
         }
-
-        obfuscatedCounter.reset()
-        spoofingDetector.reset()
-        isActive   = true
-        isBlocked  = false
-        isFinished = false
     }
 
     /// Вызывается ExerciseTrackerManager для каждого Vision-наблюдения (Layer 1).
     ///
+    /// - Parameters:
+    ///   - observation: наблюдение Vision для текущего кадра.
+    ///   - exerciseKind: тип упражнения. Нужен слою 1: у `.hold` (планка)
+    ///     неподвижность — это норма, а не признак видеозаписи.
     /// - Returns: `true` если кадр прошёл проверку; `false` — кадр заблокирован.
     @discardableResult
-    public func validateFrame(observation: VNHumanBodyPoseObservation) -> Bool {
-        guard isActive, !isBlocked else { return false }
+    public func validateFrame(observation: VNHumanBodyPoseObservation,
+                              exerciseKind: ExerciseKind) -> Bool {
+        guard canProcess else { return false }
         guard configuration.enableAntiSpoofing else { return true }
 
-        if let violation = spoofingDetector.evaluate(observation: observation) {
+        if let violation = spoofingDetector.evaluate(observation: observation,
+                                                     exerciseKind: exerciseKind) {
             handleThreat(.spoofingDetected(violation))
             return false
         }
@@ -264,21 +351,48 @@ public final class SecureWorkoutSession: @unchecked Sendable {
         peakDepthAngle: Double,
         difficultyLevel: Double = 1.0
     ) {
-        guard isActive, !isBlocked else { return }
+        // Карта уверенности Vision — прямое доказательство реального скелета.
+        registerRep(
+            confidences: [
+                "minConfidence": joints.minConfidence,
+                "side": joints.side == .left ? 1.0 : 0.0
+            ],
+            peakDepthAngle: peakDepthAngle,
+            difficultyLevel: difficultyLevel
+        )
+    }
 
-        // Атомарный инкремент с ротацией XOR-ключей (Layer 2).
-        obfuscatedCounter.increment()
+    /// Вариант для упражнений без односторонней выборки суставов (подтягивания
+    /// анализируются по обеим рукам сразу — `BilateralJoints`, у которых нет
+    /// поля `side`).
+    ///
+    /// Формат записи реестра НЕ меняется: `jointConfidences` — свободный
+    /// словарь `[String: Float]`, и бэкенд (`LedgerEntry.jointConfidences:
+    /// Dict[str, float]`) не валидирует набор ключей. Хэш-цепочка и схема
+    /// подписи остаются прежними.
+    ///
+    /// - Parameters:
+    ///   - confidences:     карта уверенности Vision для записи в реестр
+    ///   - peakDepthAngle:  угол первичного сустава в нижней точке (°)
+    ///   - difficultyLevel: уровень сложности (0.0–1.0)
+    public func registerRep(
+        confidences: [String: Float],
+        peakDepthAngle: Double,
+        difficultyLevel: Double = 1.0
+    ) {
+        guard canProcess else { return }
+
+        // Инкремент и чтение — ОДНА атомарная операция (Layer 2). Раньше это
+        // были два отдельных вызова, `increment()` и геттер `value`, с окном
+        // между ними: два засчитанных повтора подряд могли записать в реестр
+        // один и тот же индекс, хотя вся хэш-цепочка построена на его
+        // монотонности, и сервер прочитал бы это как повреждённый реестр.
+        let index = obfuscatedCounter.incrementAndGet()
 
         guard configuration.enableStateLedger else { return }
 
-        // Карта уверенности Vision — прямое доказательство реального скелета.
-        let confidences: [String: Float] = [
-            "minConfidence": joints.minConfidence,
-            "side": joints.side == .left ? 1.0 : 0.0
-        ]
-
         stateLedger.recordRep(
-            repIndex: obfuscatedCounter.value,
+            repIndex: index,
             jointConfidences: confidences,
             peakDepthAngle: peakDepthAngle,
             difficultyLevel: difficultyLevel
@@ -291,12 +405,19 @@ public final class SecureWorkoutSession: @unchecked Sendable {
     /// - Throws: `SecuritySessionError` или `LedgerError`.
     @discardableResult
     public func finishSession() async throws -> ServerReceipt {
-        guard isActive  else { throw SecuritySessionError.sessionNotStarted }
-        guard !isFinished else { throw SecuritySessionError.sessionAlreadyFinished }
-
-        isActive   = false
-        isFinished = true
-        scanToken  = nil  // Останавливаем периодическое сканирование
+        stateLock.lock()
+        guard _isActive else {
+            stateLock.unlock()
+            throw SecuritySessionError.sessionNotStarted
+        }
+        guard !_isFinished else {
+            stateLock.unlock()
+            throw SecuritySessionError.sessionAlreadyFinished
+        }
+        _isActive   = false
+        _isFinished = true
+        _scanToken  = nil  // Останавливаем периодическое сканирование
+        stateLock.unlock()
 
         guard configuration.enableStateLedger else {
             // Реестр отключён — возвращаем локальный счётчик без серверной верификации.
@@ -321,12 +442,22 @@ public final class SecureWorkoutSession: @unchecked Sendable {
                 guard let self else { return }
                 self.delegate?.secureSession(self, detectedThreat: error.localizedDescription ?? "")
             }
-        } else {
-            isBlocked = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.delegate?.secureSession(self, wasBlockedBy: error)
-            }
+            return
+        }
+
+        // Блокируем ровно один раз: угроза может прилететь одновременно из
+        // visionQueue (спуфинг), из очереди делегата URLSession (пиннинг) и с
+        // main (периодическое сканирование). Без этой проверки делегат получил
+        // бы несколько взаимоисключающих `wasBlockedBy` на одну блокировку.
+        stateLock.lock()
+        let alreadyBlocked = _isBlocked
+        _isBlocked = true
+        stateLock.unlock()
+        guard !alreadyBlocked else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.secureSession(self, wasBlockedBy: error)
         }
     }
 
@@ -365,8 +496,15 @@ public final class SecureWorkoutSession: @unchecked Sendable {
 
         let (data, response) = try await urlSession.data(for: request)
 
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw SecuritySessionError.sessionAlreadyFinished
+        // Раньше здесь бросался `sessionAlreadyFinished` — то есть отказ сервера
+        // верификации (500, 401, что угодно) доезжал до пользователя под видом
+        // «сессия уже завершена», и найти по этому сообщению настоящую причину
+        // было невозможно.
+        guard let http = response as? HTTPURLResponse else {
+            throw SecuritySessionError.verificationRequestFailed(statusCode: -1)
+        }
+        guard http.statusCode == 200 else {
+            throw SecuritySessionError.verificationRequestFailed(statusCode: http.statusCode)
         }
 
         let receipt = try JSONDecoder().decode(ServerReceipt.self, from: data)

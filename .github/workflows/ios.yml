@@ -1,9 +1,16 @@
 name: Build IPA
 
-# Run manually from the Actions tab, or on every push to main.
+# Run manually from the Actions tab, on every push to main, and on every PR
+# targeting main.
+#
+# The pull_request trigger is the one that earns its keep: without it nothing
+# compiled or ran the tests until code was already ON main, which makes CI a
+# post-mortem rather than a gate.
 on:
   workflow_dispatch:
   push:
+    branches: [ main ]
+  pull_request:
     branches: [ main ]
 
 jobs:
@@ -18,6 +25,17 @@ jobs:
 
       - name: Generate Xcode project
         run: xcodegen generate
+
+      # Runs before the build so a logic regression fails fast, and because the
+      # build below targets `iphoneos` (a device SDK) which cannot run tests —
+      # tests need a simulator destination.
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project FitnessTracker.xcodeproj \
+            -scheme FitnessTracker \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Build (unsigned)
         run: |
