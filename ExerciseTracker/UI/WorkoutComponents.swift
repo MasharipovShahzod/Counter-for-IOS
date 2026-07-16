@@ -11,38 +11,67 @@ import SwiftUI
 
 // MARK: - Exercise picker
 
-/// Custom segmented control with a sliding selection pill (matchedGeometry).
+/// Horizontally-scrolling segmented control with a sliding selection pill.
+///
+/// WHY A SCROLLER
+/// --------------
+/// The earlier version divided a fixed 320pt capsule into equal segments. That
+/// worked at two exercises (160pt each) but collapses at five (~64pt each),
+/// truncating "Parallel Bars" and friends. Content-sized pills in a horizontal
+/// scroll view scale to any number of exercises without ever clipping a label;
+/// the partial pill at the trailing edge is the affordance that says "more here".
+///
+/// The sliding pill (`matchedGeometryEffect`) and its namespace live entirely
+/// inside the scrolled `HStack`, which is the configuration where matched
+/// geometry behaves predictably across a scroll boundary.
 struct ExercisePickerView: View {
     @Binding var selection: ExerciseType
     @Namespace private var pill
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(ExerciseType.allCases, id: \.self) { exercise in
-                let isSelected = selection == exercise
-                Text(exercise.displayName)
-                    .font(.system(.subheadline, design: .rounded).weight(.bold))
-                    .foregroundColor(isSelected ? .black : Theme.textSecondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background {
-                        if isSelected {
-                            Capsule()
-                                .fill(Theme.accent)
-                                .matchedGeometryEffect(id: "pill", in: pill)
-                        }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(ExerciseType.allCases, id: \.self) { exercise in
+                        segment(exercise).id(exercise)
                     }
-                    .contentShape(Capsule())
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            selection = exercise
-                        }
-                    }
+                }
+                .padding(4)
             }
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.hairline))
+            // Keep the active exercise in view — both when tapped near an edge
+            // and when selection changes programmatically (e.g. a reset).
+            .onChange(of: selection) { newValue in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
+            .onAppear { proxy.scrollTo(selection, anchor: .center) }
         }
-        .padding(4)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.hairline))
+    }
+
+    private func segment(_ exercise: ExerciseType) -> some View {
+        let isSelected = selection == exercise
+        return Text(exercise.displayName)
+            .font(.system(.subheadline, design: .rounded).weight(.bold))
+            .foregroundColor(isSelected ? .black : Theme.textSecondary)
+            .fixedSize()                       // size to the label; never truncate
+            .padding(.vertical, 11)
+            .padding(.horizontal, 18)
+            .background {
+                if isSelected {
+                    Capsule()
+                        .fill(Theme.accent)
+                        .matchedGeometryEffect(id: "pill", in: pill)
+                }
+            }
+            .contentShape(Capsule())
+            .onTapGesture {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    selection = exercise
+                }
+            }
     }
 }
 
@@ -117,6 +146,84 @@ struct RepCounterRingView: View {
         withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { scale = 1.18 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) { scale = 1 }
+        }
+    }
+}
+
+// MARK: - Plank hold timer ring
+
+/// The plank counterpart to `RepCounterRingView`. Same ring, same 196pt frame,
+/// so switching exercises doesn't jump the layout — but it shows accumulated
+/// hold time instead of a rep count.
+///
+/// THE RING SWEEP fills over the FIRST MINUTE, then stays full.
+/// `trim = min(1, seconds / 60)`. This is deliberate rather than a per-minute
+/// repeating sweep: a repeating sweep resets from ~0.98 back to 0 at each
+/// minute boundary, and SwiftUI animates that reset by unwinding the trim
+/// backwards around the whole circle — a visible glitch once a minute. Filling
+/// once and holding full has no such artifact, and the numeric readout carries
+/// the exact time past a minute anyway.
+struct HoldTimerRingView: View {
+    /// Preformatted "M:SS" (see `WorkoutViewModel.formatHold`).
+    let timeText: String
+    /// Accumulated hold seconds, driving the ring sweep.
+    let seconds: TimeInterval
+    let tint: Color
+    /// True while the clock is actually running (repState == .holding). Drives
+    /// the gentle "alive" pulse; a paused hold sits still.
+    let isRunning: Bool
+
+    @State private var pulse = false
+
+    private var sweep: CGFloat {
+        guard seconds > 0 else { return 0 }
+        return CGFloat(min(1, seconds / 60))
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.12), lineWidth: 14)
+
+            Circle()
+                .trim(from: 0, to: sweep)
+                .stroke(tint, style: StrokeStyle(lineWidth: 14, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .shadow(color: tint.opacity(0.7), radius: 9)
+                // Steps once per second (seconds is whole-second quantized), so
+                // an ease reads as a clock tick rather than a jump.
+                .animation(.easeInOut(duration: 0.3), value: sweep)
+                .animation(.easeInOut(duration: 0.25), value: tint)
+
+            VStack(spacing: 0) {
+                Text(timeText)
+                    .font(.system(size: 56, weight: .black, design: .rounded))
+                    .foregroundColor(Theme.textPrimary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)   // survives "12:30"+
+                    .padding(.horizontal, 8)
+                Text("HOLD")
+                    .font(.system(.caption, design: .rounded).weight(.heavy))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .scaleEffect(isRunning && pulse ? 1.04 : 1.0)
+        }
+        .frame(width: 196, height: 196)
+        .onChange(of: isRunning) { running in updatePulse(running) }
+        .onAppear { updatePulse(isRunning) }
+    }
+
+    /// Starts a slow breath while the clock runs; settles when it pauses.
+    /// Driven off `isRunning` so the repeating animation is always torn down
+    /// when the hold stops, never left looping on a paused timer.
+    private func updatePulse(_ running: Bool) {
+        if running {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { pulse = false }
         }
     }
 }

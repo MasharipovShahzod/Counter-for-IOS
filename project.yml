@@ -24,11 +24,20 @@ targets:
         # Required — the app crashes on camera start without this.
         NSCameraUsageDescription: Used to count your push-ups and squats.
         UILaunchScreen: {}
+        # Portrait-only, and the tracker depends on it: the orientation handed to
+        # Vision (`.right`) and the gravity→image projection in
+        # `PoseGeometry.imageDown` are both derived for a portrait phone.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIRequiredDeviceCapabilities:
-          - armv7
-          - front-facing-camera
+          # arm64, not armv7: armv7 is 32-bit and no device that can run iOS 15
+          # has it. Declaring it asked the App Store to restrict the app to
+          # hardware that by definition cannot install it.
+          - arm64
+          # The workout is filmed on the REAR camera, so that is what to require.
+          # This said `front-facing-camera`, matching the old hardcoded selfie
+          # capture rather than the tracker's actual design.
+          - video-camera
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.fitnesstracker
@@ -38,10 +47,36 @@ targets:
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
 
+  # Unit tests for the pure logic: pose geometry, threshold/tolerance maths, and
+  # the rep state machines. All of it runs without a camera or a device, which is
+  # the whole point — the trig and the counting rules are exactly the parts no
+  # one can eyeball for correctness.
+  FitnessTrackerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: FitnessTracker
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.fitnesstracker.tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        # Hosted by the app: the module links UIKit/AVFoundation, so the tests
+        # need an app host to load into on the simulator.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/FitnessTracker.app/FitnessTracker"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
 schemes:
   FitnessTracker:
     build:
       targets:
         FitnessTracker: all
+        FitnessTrackerTests: [test]
+    test:
+      config: Debug
+      targets:
+        - FitnessTrackerTests
     archive:
       config: Release

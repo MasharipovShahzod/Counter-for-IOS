@@ -57,9 +57,18 @@ final class WorkoutViewModel: NSObject, ObservableObject {
     @Published private(set) var repState: RepState = .ready
     @Published private(set) var depth: Double = 0           // 0...1, drives the ring
     @Published private(set) var form: FormFeedback = .optimal
+
+    /// Accumulated plank time, in seconds. Only meaningful when
+    /// `exercise.kind == .hold`; stays 0 for rep-counting exercises.
+    @Published private(set) var holdSeconds: TimeInterval = 0
     @Published private(set) var isBodyTracked: Bool = false
     @Published private(set) var compatibility: SafetyCheckResult = .supported
     @Published private(set) var cameraAuthorized: Bool = true
+
+    /// Non-nil when a security layer has blocked the session. The workout is
+    /// over at that point — the HUD surfaces this as a blocking overlay rather
+    /// than letting the athlete keep repping into a counter nobody will honour.
+    @Published private(set) var securityBlock: String?
 
     /// Toggles the live skeleton overlay on the camera preview.
     @Published var showSkeleton: Bool = true
@@ -84,8 +93,26 @@ final class WorkoutViewModel: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "com.exercisetracker.session")
     private let sampleQueue = DispatchQueue(label: "com.exercisetracker.samples",
                                             qos: .userInitiated)
-    private let usingFrontCamera = true
+
+    /// Which camera films the workout.
+    ///
+    /// FALSE — the BACK camera. The whole tracker is designed around filming the
+    /// athlete from behind: `PullUpAnalyzer` measures both wrists against a
+    /// locked bar line and deliberately consults no facial landmark, because
+    /// from behind there are none. This was hardcoded `true` (and, being a
+    /// `let`, unswitchable), so the app ran the selfie camera and that entire
+    /// design was unreachable.
+    ///
+    /// Three things must move together if this changes: the capture `position`,
+    /// the `CGImagePropertyOrientation` handed to Vision, and
+    /// `tracker.isFrontCamera` — see `configureSession()` and `captureOutput`.
+    private var usingFrontCamera = false
     private var isConfigured = false
+
+    // MARK: Security (Layers 1–4)
+
+    private var security: SecureWorkoutSession?
+    private var securityTask: Task<Void, Never>?
 
     // MARK: Haptics
 
@@ -99,6 +126,7 @@ final class WorkoutViewModel: NSObject, ObservableObject {
     override init() {
         super.init()
         tracker.delegate = self
+        tracker.isFrontCamera = usingFrontCamera
     }
 
     // MARK: Lifecycle (called from the View)
@@ -107,10 +135,18 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         compatibility = tracker.checkDeviceCompatibility()
         guard compatibility.isSupported else { return }
         prepareHaptics()
+        // CoreMotion feeds the orientation anti-cheat. Bracketed by the screen's
+        // lifetime, not the tracker's — the tracker outlives this screen being
+        // visible, so starting it in `init` left the sensor sampling at 30Hz
+        // after the user had navigated away.
+        tracker.startSensors()
+        startSecurity()
         requestCameraAndStart()
     }
 
     func onDisappear() {
+        tracker.stopSensors()
+        finishSecurity()
         sessionQueue.async { [session] in
             if session.isRunning { session.stopRunning() }
         }
@@ -125,11 +161,97 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         repCount = 0
         repState = .ready
         depth = 0
+        holdSeconds = 0
         setFormOptimal()
     }
 
     func toggleSkeleton() {
         showSkeleton.toggle()
+    }
+
+    // MARK: Security lifecycle
+
+    /// Security configuration for the project AS IT ACTUALLY STANDS TODAY.
+    ///
+    /// Being blunt about what is on and why, because the honest answer is "less
+    /// than the file names suggest":
+    ///
+    ///  • L1 anti-spoofing — ON. Fully local, no dependencies, works today.
+    ///  • L2 process integrity — ON, but see `softMode`.
+    ///  • L3 crypto ledger + ECDH — OFF. It needs a live backend, and
+    ///    `SecurityConfiguration` still ships the placeholder host
+    ///    `api.yourfitnessapp.com`. Enabled, `startSession()` would fail on the
+    ///    handshake and take the whole workout down with it.
+    ///  • L4 SSL pinning — OFF alongside L3. There is nothing to pin until
+    ///    there are requests to make.
+    ///  • `softMode` — ON, because `expectedTeamID` and `expectedBundleID` are
+    ///    placeholders (`"ВАШЕ_TEAM_ID"`, `com.yourcompany.exercisetracker`)
+    ///    while the real bundle id is `com.example.fitnesstracker`. In hard mode
+    ///    `AppIntegrityChecker` would spot the mismatch and block every build,
+    ///    including honest ones.
+    ///
+    /// TO GO LIVE, IN THIS ORDER:
+    ///   1. Real `sessionInitURL` / `workoutVerifyURL`.
+    ///   2. Real `expectedTeamID` / `expectedBundleID`.
+    ///   3. Real SPKI hashes in `pinConfig`.
+    ///   4. Then `enableStateLedger = true`, `enableSSLPinning = true`,
+    ///      `softMode = false`.
+    ///
+    /// Until step 4 lands, treat this layer as telemetry rather than protection:
+    /// with no server verifying the ledger, the rep count is still just the
+    /// client's word.
+    private static func makeSecurityConfiguration() -> SecurityConfiguration {
+        var config = SecurityConfiguration()
+        config.enableAntiSpoofing     = true
+        config.enableProcessIntegrity = true
+        config.enableStateLedger      = false
+        config.enableSSLPinning       = false
+        config.softMode               = true
+        return config
+    }
+
+    private func startSecurity() {
+        guard security == nil else { return }
+        let session = SecureWorkoutSession(configuration: Self.makeSecurityConfiguration())
+        session.delegate = self
+        security = session
+
+        securityTask = Task { [weak self] in
+            do {
+                try await session.startSession()
+            } catch {
+                // Read the message out here: `Error` isn't Sendable, and hopping
+                // one across the actor boundary is a needless fight to pick.
+                let message = error.localizedDescription
+                await MainActor.run {
+                    // A failed start must not fail silently — the athlete would
+                    // otherwise train a whole set believing they were covered.
+                    self?.securityBlock = message
+                }
+                return
+            }
+            await MainActor.run {
+                // Attached only AFTER a successful start, never before: until
+                // the session is active `validateFrame` refuses every frame, and
+                // the tracker reads a refusal as lost tracking. Wiring it up
+                // front would park the HUD on "Position your body" for the whole
+                // handshake.
+                self?.tracker.secureSession = session
+            }
+        }
+    }
+
+    private func finishSecurity() {
+        securityTask?.cancel()
+        securityTask = nil
+        guard let session = security else { return }
+        security = nil
+        tracker.secureSession = nil
+        // Fire-and-forget: the screen is already going away, and with the ledger
+        // disabled this just returns the local count. The task holds the last
+        // strong reference, so the session deinits — and invalidates its
+        // URLSession — once this completes.
+        Task { try? await session.finishSession() }
     }
 
     // MARK: Camera setup
@@ -232,13 +354,62 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         if form.isCritical { return "Fix your posture!" }
         if form.isWarning { return "Adjust your form" }
         switch repState {
-        case .ready:              return "Ready!"
-        case .descending:         return exercise == .pushUp ? "Lower down…" : "Squat down…"
-        case .atBottom:           return "Looking good!"
-        case .ascending:          return exercise == .pushUp ? "Press up!" : "Stand up!"
+        case .ready:              return readyCue
+        case .barLocked:          return "Hang and pull!"
+        case .holding:            return "Hold it!"
+        case .descending:         return descendingCue
+        case .atBottom:           return exercise == .pullUp ? "Chin over the bar!" : "Looking good!"
+        case .ascending:          return ascendingCue
         case .invalidRepDetected: return "Adjust your form"
         case .invalidPosition:    return "Fix your posture!"
         }
+    }
+
+    /// `.ready` means different things per exercise: at the top of a push-up,
+    /// standing for a squat — but for a pull-up it means "not on the bar yet",
+    /// and for a plank "not in position yet". A flat "Ready!" would be wrong.
+    private var readyCue: String {
+        switch exercise {
+        case .pullUp: return "Grab the bar"
+        case .plank:  return "Get into position"
+        default:      return "Ready!"
+        }
+    }
+
+    private var descendingCue: String {
+        switch exercise {
+        case .pushUp: return "Lower down…"
+        case .squat:  return "Squat down…"
+        case .dips:   return "Dip down…"
+        case .pullUp: return "Lower…"
+        case .plank:  return "Hold…"
+        }
+    }
+
+    private var ascendingCue: String {
+        switch exercise {
+        case .pushUp, .dips: return "Press up!"
+        case .squat:         return "Stand up!"
+        case .pullUp:        return "Pull!"
+        case .plank:         return "Hold…"
+        }
+    }
+
+    /// True when the HUD should show the plank timer instead of the rep ring.
+    var showsHoldTimer: Bool { exercise.kind == .hold }
+
+    /// True while the plank clock is actively running (not arming or paused).
+    var timerIsRunning: Bool { repState == .holding }
+
+    /// Plank time as `M:SS`, for the HUD.
+    var holdText: String { Self.formatHold(holdSeconds) }
+
+    /// Formats a hold duration as `M:SS` with a zero-padded seconds field.
+    /// Pure and static so it can be tested without standing up the view model
+    /// or a camera. Negative input is clamped to zero.
+    static func formatHold(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     var statusIcon: String {
@@ -260,6 +431,29 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         if form.isCritical { return Theme.danger }
         if form.isWarning { return Theme.warning }
         return Theme.accent
+    }
+}
+
+// MARK: - Security callbacks (all delivered on main)
+
+extension WorkoutViewModel: SecureWorkoutSessionDelegate {
+
+    func secureSession(_ session: SecureWorkoutSession,
+                       wasBlockedBy error: SecuritySessionError) {
+        securityBlock = error.localizedDescription
+    }
+
+    func secureSession(_ session: SecureWorkoutSession, detectedThreat description: String) {
+        // Soft mode: the session carries on, but saying nothing would make the
+        // whole layer indistinguishable from it being switched off.
+        showFeedback(description, severity: .warning)
+    }
+
+    func secureSession(_ session: SecureWorkoutSession, didReceiveReceipt receipt: ServerReceipt) {
+        // The server is the authority on the count once a ledger round-trip
+        // exists. Until `enableStateLedger` is on there is no round-trip, so
+        // this never fires — see `makeSecurityConfiguration()`.
+        repCount = receipt.verifiedRepCount
     }
 }
 
@@ -315,6 +509,14 @@ extension WorkoutViewModel: ExerciseTrackerDelegate {
         // Quantize to ~1% steps so a held position doesn't spam view updates.
         let stepped = (progress * 100).rounded() / 100
         if stepped != depth { depth = stepped }
+    }
+
+    func exerciseTracker(_ tracker: ExerciseTrackerManager, didUpdateHold seconds: TimeInterval) {
+        if !isBodyTracked { isBodyTracked = true }
+        // The HUD renders whole seconds, so only republish when that changes —
+        // otherwise a plank re-renders the SwiftUI tree 30 times a second to
+        // show the same string.
+        if Int(seconds) != Int(holdSeconds) { holdSeconds = seconds }
     }
 
     func exerciseTrackerDidLoseTracking(_ tracker: ExerciseTrackerManager) {

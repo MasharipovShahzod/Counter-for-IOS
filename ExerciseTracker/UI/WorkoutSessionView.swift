@@ -60,13 +60,22 @@ struct WorkoutSessionView: View {
                 get: { vm.exercise },
                 set: { vm.select($0) }
             ))
-            .frame(maxWidth: 320)
+            .frame(maxWidth: .infinity)
 
-            RepCounterRingView(count: vm.repCount,
-                               depth: vm.depth,
-                               tint: vm.ringTint,
-                               pulse: vm.repPulse)
-                .padding(.top, 6)
+            Group {
+                if vm.showsHoldTimer {
+                    HoldTimerRingView(timeText: vm.holdText,
+                                      seconds: vm.holdSeconds,
+                                      tint: vm.ringTint,
+                                      isRunning: vm.timerIsRunning)
+                } else {
+                    RepCounterRingView(count: vm.repCount,
+                                       depth: vm.depth,
+                                       tint: vm.ringTint,
+                                       pulse: vm.repPulse)
+                }
+            }
+            .padding(.top, 6)
 
             Spacer()
 
@@ -121,6 +130,16 @@ struct WorkoutSessionView: View {
                 title: "Unsupported Device",
                 message: vm.compatibility.userMessage ??
                     "This device can't run real-time body tracking."
+            )
+        } else if let block = vm.securityBlock {
+            // A tripped security layer stops counting outright. Without this
+            // overlay the block is invisible: the tracker just reports lost
+            // tracking on every frame and the athlete keeps repping into a
+            // counter that will never move again.
+            BlockingOverlay(
+                systemImage: "exclamationmark.shield.fill",
+                title: "Session Blocked",
+                message: block
             )
         } else if !vm.cameraAuthorized {
             BlockingOverlay(

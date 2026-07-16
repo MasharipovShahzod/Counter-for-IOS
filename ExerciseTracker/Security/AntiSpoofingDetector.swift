@@ -68,8 +68,34 @@ public final class AntiSpoofingDetector {
     private let windowSize = 60
 
     /// Ниже этой дисперсии соотношений сегментов → нет 3D-движения → видеофайл.
-    /// Откалибровано по 500 живым сессиям; значение < 4e-4 не встречается у людей.
+    ///
+    /// НЕ ОТКАЛИБРОВАНО НА УСТРОЙСТВЕ. Здесь раньше стоял комментарий
+    /// «Откалибровано по 500 живым сессиям; значение < 4e-4 не встречается
+    /// у людей» — таких замеров не было, и число подобрано умозрительно.
+    /// Оставляем его как рабочую гипотезу, но без ложной уверенности:
+    /// порог обязан быть перепроверен на реальных записях до релиза.
     private let zVarianceThreshold: Double = 4e-4
+
+    /// Минимальное смещение опорного сустава за кадр (в нормированных единицах),
+    /// при котором кадр вообще участвует в выборке Z-прокси.
+    ///
+    /// ЗАЧЕМ ЭТО НУЖНО
+    /// ---------------
+    /// Z-прокси измеряет дисперсию соотношения сегментов и трактует её отсутствие
+    /// как «плоское видео». Но неподвижность — это суть планки и мёртвого виса:
+    /// честный атлет, замерший на 2 секунды (= окно в 60 кадров), даёт нулевую
+    /// дисперсию по определению и получал блокировку `flatVideoReplay`, после
+    /// которой `isBlocked` навсегда обрывал сессию. Сигнал осмыслен только на
+    /// движущемся теле, поэтому неподвижные кадры в окно больше не попадают:
+    /// при удержании позы окно просто не наполняется и проверка молчит.
+    ///
+    /// ЗНАЧЕНИЕ — ОЦЕНОЧНОЕ. Собственный джиттер Vision у неподвижного человека
+    /// ориентировочно ~1e-3, активное движение (плечо в отжимании) ~7e-3.
+    /// Порог намеренно смещён к верхней границе: если он ЗАВЫШЕН, окно не
+    /// наполняется и Z-прокси просто не срабатывает — сигнал слабеет, но ложных
+    /// блокировок честного атлета нет. Если ЗАНИЖЕН — возвращаются именно они.
+    /// Из двух ошибок выбрана молчаливая. Требует калибровки на устройстве.
+    private let movementFloor: Double = 3e-3
 
     /// Средний пиксельный шум ниже этого → идеально стабильные координаты → инъекция.
     /// Настоящая рука даёт ≥ 5e-5 даже в режиме максимальной неподвижности.
@@ -112,9 +138,15 @@ public final class AntiSpoofingDetector {
 
     /// Обрабатывает одно Vision-наблюдение. Вызывать из visionQueue.
     ///
+    /// - Parameters:
+    ///   - observation: наблюдение Vision для текущего кадра.
+    ///   - exerciseKind: тип упражнения. Для `.hold` сигнал [A] не применяется
+    ///     вовсе: у планки неподвижность — это и есть упражнение, поэтому
+    ///     «нет движения в глубину» там не улика, а описание правильной формы.
     /// - Returns: `LivenessViolation` если кадр подозрительный, иначе `nil`.
     @discardableResult
-    public func evaluate(observation: VNHumanBodyPoseObservation) -> LivenessViolation? {
+    public func evaluate(observation: VNHumanBodyPoseObservation,
+                         exerciseKind: ExerciseKind = .reps) -> LivenessViolation? {
         guard let allPoints = try? observation.recognizedPoints(.all) else { return nil }
 
         // ── [C] Обнаружение замороженного кадра ────────────────────────────
@@ -129,11 +161,18 @@ public final class AntiSpoofingDetector {
         }
         prevFrameHash = signature
 
+        // Смещение опорного сустава за кадр. Считается ДО [A], потому что
+        // Z-прокси теперь обязан знать, двигался ли атлет вообще.
+        let motion = updateMotion(allPoints)
+
         // ── [A] Дисперсия масштаба (Z-прокси) ──────────────────────────────
-        if let violation = evaluateZProxy(allPoints) { return violation }
+        // Только для упражнений «на повторения». Планка неподвижна по своей
+        // сути — там этот сигнал не просто бесполезен, он систематически ложен.
+        if exerciseKind == .reps,
+           let violation = evaluateZProxy(allPoints, motion: motion) { return violation }
 
         // ── [B] Анализ микротремора ─────────────────────────────────────────
-        if let violation = evaluateMicroTremor(allPoints) { return violation }
+        if let violation = evaluateMicroTremor() { return violation }
 
         return nil
     }
@@ -153,8 +192,14 @@ public final class AntiSpoofingDetector {
     // MARK: — Z-прокси (сигнал A)
 
     private func evaluateZProxy(
-        _ pts: [VNHumanBodyPoseObservation.JointName: VNRecognizedPoint]
+        _ pts: [VNHumanBodyPoseObservation.JointName: VNRecognizedPoint],
+        motion: Double?
     ) -> LivenessViolation? {
+
+        // Кадры без реального движения в выборку не берём — см. `movementFloor`.
+        // Иначе честная планка (2 секунды неподвижности) даёт нулевую дисперсию
+        // и блокируется как «плоское видео».
+        guard let motion = motion, motion >= movementFloor else { return nil }
 
         // Два измерения: ширина плеч и высота торса (левая сторона).
         // Их соотношение меняется при движении в глубину (перспектива).
@@ -183,22 +228,30 @@ public final class AntiSpoofingDetector {
 
     // MARK: — Микротремор (сигнал B)
 
-    private func evaluateMicroTremor(
+    /// Обновляет δ-буферы по опорному суставу и возвращает смещение за кадр.
+    ///
+    /// Вынесено из `evaluateMicroTremor`, потому что величина смещения нужна
+    /// ещё и сигналу [A] — решить, движется ли атлет вообще. Возвращает `nil`,
+    /// если опорный сустав в этом кадре недостаточно уверенный или это первый
+    /// кадр (сравнивать не с чем).
+    private func updateMotion(
         _ pts: [VNHumanBodyPoseObservation.JointName: VNRecognizedPoint]
-    ) -> LivenessViolation? {
+    ) -> Double? {
 
         // Используем левое плечо как опорную точку для δ-измерений.
         guard let ls = pts[.leftShoulder], ls.confidence > 0.5 else { return nil }
         let pos = ls.location
+        defer { prevShoulderPos = pos }
 
-        if let prev = prevShoulderPos {
-            let dx = abs(Double(pos.x) - Double(prev.x))
-            let dy = abs(Double(pos.y) - Double(prev.y))
-            push(&xNoiseHistory, value: dx)
-            push(&yNoiseHistory, value: dy)
-        }
-        prevShoulderPos = pos
+        guard let prev = prevShoulderPos else { return nil }
+        let dx = abs(Double(pos.x) - Double(prev.x))
+        let dy = abs(Double(pos.y) - Double(prev.y))
+        push(&xNoiseHistory, value: dx)
+        push(&yNoiseHistory, value: dy)
+        return (dx * dx + dy * dy).squareRoot()
+    }
 
+    private func evaluateMicroTremor() -> LivenessViolation? {
         guard xNoiseHistory.count >= windowSize else { return nil }
 
         let avgNoise = (mean(xNoiseHistory) + mean(yNoiseHistory)) / 2.0

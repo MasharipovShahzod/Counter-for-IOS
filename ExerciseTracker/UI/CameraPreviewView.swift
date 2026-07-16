@@ -18,10 +18,18 @@
 //  COORDINATE MAPPING
 //  ------------------
 //  Vision points are normalized (0...1), origin BOTTOM-LEFT, Y-up, in the same
-//  upright+mirrored space the preview shows (we pin the preview connection to
-//  .portrait and feed Vision `.leftMirrored` for the front camera, so the two
-//  spaces match). `layerPoint(for:)` then replicates `.resizeAspectFill`
-//  cropping manually using the upright image aspect ratio.
+//  upright space the preview shows. The two spaces match because both halves
+//  agree about the camera: we pin the preview connection to .portrait, and the
+//  view model feeds Vision the orientation matching the capture device —
+//  `.right` for the BACK camera (the framing this app uses) or `.leftMirrored`
+//  for the FRONT one, whose image is mirrored.
+//
+//  That agreement is why `layerPoint(for:)` can use `visionPoint.x` directly:
+//  AVCaptureVideoPreviewLayer mirrors the front camera and not the back one, by
+//  default, which is exactly the difference the two orientations encode. Change
+//  one side without the other and the skeleton renders flipped against the
+//  video. `layerPoint(for:)` then replicates `.resizeAspectFill` cropping
+//  manually using the upright image aspect ratio.
 //
 
 import SwiftUI
@@ -158,7 +166,7 @@ struct CameraPreviewView: UIViewRepresentable {
             let W = bounds.width, H = bounds.height
             guard W > 0, H > 0, imageAspect > 0 else { return .zero }
 
-            let xFromLeft = visionPoint.x          // mirror-consistent with the preview
+            let xFromLeft = visionPoint.x          // mirror-consistent with the preview (see header)
             let yFromTop = 1 - visionPoint.y        // Vision Y-up → UIKit Y-down
             let layerAspect = W / H
 
@@ -180,18 +188,39 @@ struct CameraPreviewView: UIViewRepresentable {
 
         // MARK: Skeleton topology
 
+        /// The COMPLETE Vision body topology: all 19 joints `VNHumanBodyPose`
+        /// exposes, wired into 18 bones. The face (eyes + ears) is included so
+        /// the on-screen "cyber-skeleton" reads as a full body rather than a
+        /// headless torso.
+        ///
+        /// This is a RENDERING concern only. The analyzers deliberately compute
+        /// on a filtered joint set (wrists, shoulders, elbows, hips, knees,
+        /// ankles) off the main thread — the extra facial joints are drawn but
+        /// never fed into any angle maths.
+        ///
+        /// Occlusion is handled for free by the per-joint confidence gate in
+        /// `render`: from behind the athlete (rear-view pull-ups) the facial
+        /// joints fall below `confidenceThreshold` and simply aren't drawn, so
+        /// no stray lines hang off the back of the head.
         static let connections: [(VNHumanBodyPoseObservation.JointName,
                                   VNHumanBodyPoseObservation.JointName)] = [
+            // Face
+            (.nose, .leftEye), (.leftEye, .leftEar),
+            (.nose, .rightEye), (.rightEye, .rightEar),
             (.neck, .nose),
+            // Arms
             (.neck, .leftShoulder), (.leftShoulder, .leftElbow), (.leftElbow, .leftWrist),
             (.neck, .rightShoulder), (.rightShoulder, .rightElbow), (.rightElbow, .rightWrist),
+            // Spine
             (.neck, .root),
+            // Legs
             (.root, .leftHip), (.leftHip, .leftKnee), (.leftKnee, .leftAnkle),
             (.root, .rightHip), (.rightHip, .rightKnee), (.rightKnee, .rightAnkle),
         ]
 
         static let jointDots: [VNHumanBodyPoseObservation.JointName] = [
-            .nose, .neck, .root,
+            .nose, .leftEye, .rightEye, .leftEar, .rightEar,
+            .neck, .root,
             .leftShoulder, .leftElbow, .leftWrist,
             .rightShoulder, .rightElbow, .rightWrist,
             .leftHip, .leftKnee, .leftAnkle,
