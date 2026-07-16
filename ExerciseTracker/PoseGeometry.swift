@@ -232,6 +232,38 @@ enum PoseGeometry {
         return theta > 90 ? 180 - theta : theta        // 0...90 from vertical
     }
 
+    /// How far `a` sits BELOW `b` along real-world "down", in normalized units.
+    /// Positive when `a` is lower than `b`, negative when it is higher.
+    ///
+    /// WHY A SQUAT NEEDS THIS AND AN ANGLE WON'T DO
+    /// -------------------------------------------
+    /// "Thighs parallel to the floor" is a statement about the hip being level
+    /// with the knee — a linear fact — and the knee ANGLE is only a proxy for it.
+    /// A bad one, too: with the thigh horizontal, the knee angle equals 90° minus
+    /// the shin's forward lean, so parallel lands anywhere from 90° (a perfectly
+    /// vertical shin, which nobody has) down to ~70° for the 20° lean a real
+    /// squat carries. Judging depth at "knee ≤ 90°" therefore credits reps well
+    /// above parallel, and how far above depends on the athlete's own limb
+    /// proportions. Measuring the hip against the knee just asks the question
+    /// directly.
+    ///
+    /// Falls back to the image's vertical axis when no gravity reading is
+    /// available — Vision is Y-up, so "lower" means a smaller y.
+    ///
+    /// Returns the most negative value possible for non-finite input: the
+    /// caller's test is `drop >= -tolerance`, so this rejects the frame rather
+    /// than waving it through. See the fail-closed contract on `isFinite`.
+    static func drop(of a: CGPoint, below b: CGPoint, imageDown: CGVector?) -> CGFloat {
+        guard isFinite(a), isFinite(b) else { return -.greatestFiniteMagnitude }
+
+        guard let down = imageDown else { return b.y - a.y }
+        let dmag = hypot(down.dx, down.dy)
+        guard dmag > 0, dmag.isFinite else { return b.y - a.y }
+
+        // Project (a − b) onto the unit "down" direction.
+        return ((a.x - b.x) * down.dx + (a.y - b.y) * down.dy) / dmag
+    }
+
     /// Euclidean distance between two joints, in normalized units.
     ///
     /// Used to derive scale-invariant reference lengths (e.g. the shoulder→wrist

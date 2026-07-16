@@ -205,10 +205,42 @@ final class SquatAnalyzerTests: XCTestCase {
     func testFullRepCountsOnce() {
         let a = SquatAnalyzer()
         feed(a, Pose.squat(knee: 175))          // standing tall
-        feed(a, Pose.squat(knee: 85))           // thighs past parallel
+        feed(a, Pose.squat(knee: 65))           // hips below the knees
         let events = feed(a, Pose.squat(knee: 175))
 
         XCTAssertEqual(events.repCounts.last, 1)
+        XCTAssertEqual(a.successfulReps, 1)
+    }
+
+    /// THE REGRESSION GUARD FOR THE DEPTH FIX.
+    ///
+    /// 85° at the knee clears the old `depthAngle` gate of 94.5° with room to
+    /// spare, and every squat test used to be written at that angle — yet with a
+    /// realistic 13.6° shin lean the hip is still ~0.03 ABOVE the knee there.
+    /// It is a high squat that the counter used to pay out for, and it read as
+    /// correct because "90° at the knee" sounds like the textbook cue.
+    ///
+    /// If this test ever goes green by counting a rep, the analyzer has drifted
+    /// back to judging depth by knee angle.
+    func testSquatAboveParallelDoesNotCount() {
+        let a = SquatAnalyzer()
+        feed(a, Pose.squat(knee: 175))
+        feed(a, Pose.squat(knee: 85))           // past 94.5° — but ABOVE parallel
+        let events = feed(a, Pose.squat(knee: 175))
+
+        XCTAssertEqual(a.successfulReps, 0,
+                       "knee angle past the old 94.5° gate is not parallel")
+        XCTAssertTrue(events.invalidFeedback.contains { $0.contains("hips below your knees") })
+    }
+
+    /// The other side of the same boundary: just past parallel must count, or
+    /// the fix would have simply made the app impossible to satisfy.
+    func testSquatJustBelowParallelCounts() {
+        let a = SquatAnalyzer()
+        feed(a, Pose.squat(knee: 175))
+        feed(a, Pose.squat(knee: 70))           // ~0.015 below parallel
+        feed(a, Pose.squat(knee: 175))
+
         XCTAssertEqual(a.successfulReps, 1)
     }
 
@@ -226,15 +258,13 @@ final class SquatAnalyzerTests: XCTestCase {
 
     func testExcessiveForwardLeanIsFlagged() {
         let a = SquatAnalyzer()
-        // Shoulder thrown far forward of the hip: ~63° from vertical, past 57.75°.
-        let leaning = CGPoint(x: 0.9, y: 0.7)
 
         var all: [AnalyzerEvent] = []
-        all += feed(a, Pose.squat(knee: 175, shoulder: leaning))
-        all += feed(a, Pose.squat(knee: 85, shoulder: leaning))
+        all += feed(a, Pose.squat(knee: 175, torsoLean: 63))   // 63° > the 57.75° bound
+        all += feed(a, Pose.squat(knee: 65,  torsoLean: 63))
         // Drive it all the way back to lockout, or "0 reps" would pass trivially
         // just because the rep never resolved.
-        all += feed(a, Pose.squat(knee: 175, shoulder: leaning))
+        all += feed(a, Pose.squat(knee: 175, torsoLean: 63))
 
         XCTAssertTrue(all.invalidFeedback.contains("Keep your chest up!"))
         XCTAssertEqual(a.successfulReps, 0,
@@ -244,7 +274,7 @@ final class SquatAnalyzerTests: XCTestCase {
     func testUprightTorsoIsNotFlagged() {
         let a = SquatAnalyzer()
         feed(a, Pose.squat(knee: 175))
-        let events = feed(a, Pose.squat(knee: 85))
+        let events = feed(a, Pose.squat(knee: 65))
         XCTAssertFalse(events.invalidFeedback.contains("Keep your chest up!"),
                        "a vertical torso must not trip the lean check")
     }

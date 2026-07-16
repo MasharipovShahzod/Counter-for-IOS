@@ -168,22 +168,28 @@ final class DipsOrientationTests: XCTestCase {
 
 final class SquatDisplacementTests: XCTestCase {
 
-    /// The corroboration gate must not reject an honest squat — the hips clearly
-    /// travel here, so it counts exactly as before.
+    /// The depth criterion must not reject an honest squat — the hips clearly
+    /// travel below the knees here, so it counts.
     func testRealSquatStillCounts() {
         let a = SquatAnalyzer()
         feed(a, Pose.squat(knee: 175))
-        feed(a, Pose.squat(knee: 85))
+        feed(a, Pose.squat(knee: 65))
         feed(a, Pose.squat(knee: 175))
         XCTAssertEqual(a.successfulReps, 1)
     }
 
     /// Depth reached by knee angle alone, with the hips pinned so they never
-    /// descend relative to the ankles: rejected, and coached.
+    /// descend at all: rejected, and coached.
+    ///
+    /// This used to be caught by a separate, fail-open hip-vs-ankle gate bolted
+    /// on beside the knee-angle criterion. It now falls straight out of the
+    /// criterion itself — the hip never gets near the knee — so the extra gate
+    /// is gone and this case is covered by the rule rather than by an exception
+    /// to it.
     func testFakedDepthWithoutHipDescentIsRejected() {
         let a = SquatAnalyzer()
-        feed(a, Pose.squatNoHipDrop(knee: 175))   // arm; standing gap captured
-        feed(a, Pose.squatNoHipDrop(knee: 85))    // knee angle hits depth…
+        feed(a, Pose.squatNoHipDrop(knee: 175))   // arm at standing
+        feed(a, Pose.squatNoHipDrop(knee: 85))    // knee angle hits the old depth…
         let events = feed(a, Pose.squatNoHipDrop(knee: 175))   // …but hips never dropped
 
         XCTAssertEqual(a.successfulReps, 0, "faked depth with no hip travel must not count")

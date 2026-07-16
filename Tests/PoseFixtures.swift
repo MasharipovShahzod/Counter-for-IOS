@@ -111,18 +111,67 @@ enum Pose {
                           minConfidence: 0.9, side: .right)
     }
 
-    /// A squat pose with a given knee angle and an upright torso.
-    static func squat(knee kneeDegrees: CGFloat,
-                      shoulder: CGPoint = CGPoint(x: 0.5, y: 0.8)) -> BodyJoints {
-        let hip  = CGPoint(x: 0.5, y: 0.5)
-        let knee = CGPoint(x: 0.5, y: 0.3)
-        let r: CGFloat = 0.2
-        let t = kneeDegrees * .pi / 180
-        let ankle = CGPoint(x: knee.x + r * sin(t), y: knee.y + r * cos(t))
+    /// A squat pose with a given knee angle and a torso leaning `torsoLean`
+    /// degrees from vertical.
+    ///
+    /// ANATOMICALLY CONSISTENT — WHICH THE PREVIOUS VERSION WAS NOT.
+    /// That one pinned the hip at y=0.5 and swung the ankle around a fixed knee,
+    /// modelling an athlete whose hips never move and whose foot orbits their
+    /// shin. It made the squat tests unfalsifiable in the one dimension that
+    /// matters: nothing judging depth on hip travel could be tested against a
+    /// hip that never travels, so the fixture quietly asserted that a squat *is*
+    /// a knee angle. The analyzer then agreed with it, and both were wrong
+    /// together.
+    ///
+    /// THE MODEL. The ankle is planted. The shin leans forward as the athlete
+    /// descends. The thigh hangs off the knee at `kneeDegrees`, sending the hips
+    /// down and BACK — which is why the thigh vector is the shin rotated by
+    /// *minus* the knee angle; rotating the other way walks the hips forward
+    /// over the toes, into a position no one can hold.
+    ///
+    /// WHERE PARALLEL LANDS. Shin lean is `(180 − knee) / 7`, which puts the hip
+    /// level with the knee at a knee angle of **75°** with a 15° shin. That is
+    /// not a tuned constant: with the thigh horizontal, the knee angle is
+    /// exactly 90° minus the shin's lean, so parallel is wherever
+    /// `knee + shin == 90`, and the `/7` merely picks a realistic path there.
+    /// Which is the whole point of the rewrite — 90° at the knee is NOT
+    /// parallel unless the shin is perfectly vertical, and nobody's is.
+    ///
+    /// Sanity anchors: `knee: 175` ≈ standing, hip ≈ (0.49, 0.50);
+    /// `knee: 75` = exactly parallel; `knee: 65` ≈ 0.03 below parallel.
+    static func squat(knee kneeDegrees: CGFloat, torsoLean: CGFloat = 0) -> BodyJoints {
+        let ankle = CGPoint(x: 0.5, y: 0.1)
+        let shinLength: CGFloat = 0.2
+        let thighLength: CGFloat = 0.2
 
+        let theta = kneeDegrees * .pi / 180
+        let phi = ((180 - kneeDegrees) / 7) * .pi / 180   // shin lean from vertical
+
+        let knee = CGPoint(x: ankle.x + shinLength * sin(phi),
+                           y: ankle.y + shinLength * cos(phi))
+
+        // Unit vector knee→ankle, rotated by −theta to give knee→hip.
+        let ux = -sin(phi)
+        let uy = -cos(phi)
+        let hx =  ux * cos(theta) + uy * sin(theta)
+        let hy = -ux * sin(theta) + uy * cos(theta)
+        let hip = CGPoint(x: knee.x + thighLength * hx,
+                          y: knee.y + thighLength * hy)
+
+        // The torso hangs off the hip at `torsoLean` from vertical, leaning
+        // forward (+x). An ANGLE rather than an absolute shoulder point, because
+        // the hip moves now: a fixed shoulder would silently mean a different
+        // lean at every depth, which is how a lean test ends up measuring depth.
+        let lean = torsoLean * .pi / 180
+        let torsoLength: CGFloat = 0.3
+        let shoulder = CGPoint(x: hip.x + torsoLength * sin(lean),
+                               y: hip.y + torsoLength * cos(lean))
+
+        // Arms aren't part of the squat's mandatory joint set; kept plausible so
+        // the skeleton reads as a body.
         return BodyJoints(shoulder: shoulder,
-                          elbow: CGPoint(x: 0.5, y: 0.65),
-                          wrist: CGPoint(x: 0.5, y: 0.6),
+                          elbow: CGPoint(x: shoulder.x, y: (shoulder.y + hip.y) / 2),
+                          wrist: CGPoint(x: shoulder.x, y: hip.y),
                           hip: hip, knee: knee, ankle: ankle,
                           minConfidence: 0.9, side: .right)
     }

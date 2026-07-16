@@ -98,9 +98,21 @@ public enum ExerciseType: String, CaseIterable {
                 nominalMaxTorsoPitch: 30     // shoulder→hip line must stay within 30° of horizontal
             )
         case .squat:
+            // `nominalDepth` IS NOT THE SQUAT'S PASS CRITERION — do not tune it
+            // hoping to change what counts. Depth is decided by the hip reaching
+            // the knee (`SquatAnalyzer.parallelTolerance`), because "thighs
+            // parallel" is a fact about hip height and the knee angle is only a
+            // proxy for it: with the thigh horizontal the knee angle is 90° minus
+            // the shin's forward lean, so parallel really sits near 70–75° for a
+            // real squat and this 90° would credit reps above it.
+            //
+            // The declaration stays because `descentStartAngle` is derived from
+            // the lockout and the struct's shape is shared across exercises;
+            // `depthAngle` itself is simply unread here, exactly as
+            // `supportAngleMin` and `maxTorsoPitch` are.
             return ExerciseThresholds(
                 nominalDescentStart: 160,
-                nominalDepth:        90,    // thighs ~parallel to floor → tolerated to 94.5°
+                nominalDepth:        90,    // unread by SquatAnalyzer; see above
                 nominalLockout:      170,   // standing tall → tolerated to 161.5°
                 reversalMargin:      12,
                 nominalTorsoLeanMax: 55     // torso angle from vertical; beyond this = forward collapse

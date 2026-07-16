@@ -331,38 +331,54 @@ final class PushUpAnalyzer: ExerciseAnalyzer {
 // MARK: - Squats
 
 /// Side / 45°-profile squat tracker.
-/// Primary joint: knee (hip–knee–ankle).
+/// Primary joint: knee (hip–knee–ankle) — drives the state machine.
+/// Depth criterion: the HIP against the KNEE — decides whether a rep counts.
 /// Form checks: shallow depth (half-rep) and excessive torso lean.
+///
+/// WHY THE KNEE ANGLE RUNS THE MACHINE BUT DOESN'T JUDGE THE REP
+/// ------------------------------------------------------------
+/// These are two different jobs and they want two different signals.
+///
+/// The state machine needs something smooth and monotonic to detect "a descent
+/// started" and "they stood back up". The knee angle, low-pass filtered, is
+/// ideal: it sweeps cleanly from ~175° to ~65° and back.
+///
+/// Rep VALIDITY needs to answer "were the thighs parallel to the floor", and
+/// that is a question about hip height, not about an angle. This analyzer used
+/// to answer it with `knee <= depthAngle` (94.5°), which is wrong in a way that
+/// always favours the athlete: with the thigh horizontal, the knee angle is 90°
+/// minus the shin's forward lean, and a real squat leans the shin 15–25°. True
+/// parallel therefore lands around 70–75°, so a 94.5° gate credited reps well
+/// above parallel — by a margin that varied with each athlete's own femur and
+/// shin proportions. Nobody could see it, because "90° at the knee" sounds
+/// exactly like the textbook cue it was standing in for.
+///
+/// So depth is now measured where the definition actually lives: the hip must
+/// reach the knee. See `PoseGeometry.drop(of:below:imageDown:)`.
 final class SquatAnalyzer: ExerciseAnalyzer {
     private let t = RepTracker()
     private let cfg = ExerciseType.squat.repThresholds!   // .reps exercise: never nil
 
-    /// A shallow squat is flagged if the knee never bends past this before the
-    /// athlete reverses. Slightly looser than the strict depth target so a rep
-    /// that's *close* still counts but a clearly-shallow one is rejected.
-    private let shallowAngle: CGFloat = 100
+    /// How far the hip may sit ABOVE the knee and still be credited, as a
+    /// fraction of the athlete's OWN thigh length.
+    ///
+    /// A linear tolerance, not the global ±5% `Tolerance`, because the criterion
+    /// it guards is "hip level with knee" — a zero. Five percent of zero is
+    /// zero, so the project's angle-percentage scheme has nothing to say here;
+    /// scaling to the thigh is the same idea (be lenient in proportion to the
+    /// athlete) expressed in the units this measurement actually has.
+    private let parallelTolerance: CGFloat = 0.05
 
-    // MARK: Vertical-displacement corroboration (spec Step 3.2)
-    //
-    // The brief asks to confirm real hip travel relative to the ankles so that
-    // "bobbing the phone" can't fake a squat. Worth being honest about scope:
-    // the rep is already judged on the KNEE ANGLE, and angles are
-    // translation-invariant, so moving the whole phone (or the whole body)
-    // uniformly already changes no angle and counts nothing. This check is
-    // therefore defense-in-depth — it catches a knee-angle change unaccompanied
-    // by genuine hip descent (mistracking, a seated "knee wave") — not the
-    // phone-bob case, which was never countable. It is FAIL-OPEN and loose so it
-    // can never reject an honest squat.
+    /// Deepest point of the current attempt, as the hip's distance below the
+    /// knee. Negative while the hip is still above it. Tracking the MAXIMUM is
+    /// deliberate: it captures the bottom of the rep, and it means per-frame
+    /// jitter can only ever help the athlete, never rob them of a good rep.
+    private var maxHipDropBelowKnee: CGFloat = -.greatestFiniteMagnitude
 
-    /// Vertical hip→ankle gap while standing (captured at the top). The
-    /// reference the descent is measured against.
-    private var standingHipAnkleGap: CGFloat?
-    /// Smallest hip→ankle gap seen during the current attempt (deepest point).
-    private var minHipAnkleGap: CGFloat = .greatestFiniteMagnitude
-    /// The hip must close at least this fraction of the standing gap to confirm
-    /// a real descent. A parallel squat closes ~40–50%; 0.10 clears any honest
-    /// rep with huge margin while still rejecting "no descent at all".
-    private let minDescentFraction: CGFloat = 0.10
+    /// One message for every "not deep enough" outcome. Names the fix rather
+    /// than the symptom — "squat lower" alone leaves an athlete who is already
+    /// trying hard with nothing to change.
+    static let shallowMessage = "Squat lower! Get your hips below your knees."
 
     var state: RepState { t.state }
     var successfulReps: Int { t.successfulReps }
@@ -380,25 +396,32 @@ final class SquatAnalyzer: ExerciseAnalyzer {
         // up!" on an honest rep.
         let torsoLean = PoseGeometry.leanFromGravity(joints.hip, joints.shoulder,
                                                      imageDown: frame.imageDown)
-        // Vertical hip→ankle gap (Vision is Y-up: standing hip sits well above
-        // the ankle → large gap; at the bottom the hip drops → smaller gap).
-        let hipAnkleGap = joints.hip.y - joints.ankle.y
+        // THE DEPTH MEASUREMENT. How far the hip sits below the knee, and the
+        // athlete's own thigh to scale it by. Positive drop = at or past
+        // parallel.
+        let hipDrop = PoseGeometry.drop(of: joints.hip, below: joints.knee,
+                                        imageDown: frame.imageDown)
+        let thigh = PoseGeometry.distance(joints.hip, joints.knee)
 
-        // Live depth for the progress ring: 0 at lockout, 1 at the target angle.
-        events.append(.depthProgress(Self.depthProgress(primary: knee, cfg: cfg)))
+        // Live depth for the progress ring, from the SAME quantity the rep is
+        // judged on — so a full ring means a countable rep. Driving the ring off
+        // the knee angle instead would fill it at 94.5° and then refuse the rep,
+        // which reads as the app being broken rather than the squat being high.
+        //
+        // Standing puts the hip a full thigh above the knee (drop = −thigh → 0);
+        // parallel puts it level (drop = 0 → 1). Self-scaling, no constants.
+        events.append(.depthProgress(Self.hipDepthProgress(hipDrop: hipDrop, thigh: thigh)))
 
         // ---- Arm at a valid standing position ----
         if !t.attemptInProgress, knee >= cfg.lockoutAngle {
             t.arm()
-            // Refresh the standing reference while genuinely standing tall.
-            standingHipAnkleGap = hipAnkleGap
         }
 
         // ---- Start of a new attempt ----
         if !t.attemptInProgress {
             if t.isArmed, knee < cfg.descentStartAngle {
                 t.beginAttempt()
-                minHipAnkleGap = hipAnkleGap
+                maxHipDropBelowKnee = hipDrop
                 t.transition(to: .descending, sink: &events)
             } else {
                 t.transition(to: .ready, sink: &events)
@@ -407,9 +430,11 @@ final class SquatAnalyzer: ExerciseAnalyzer {
         }
 
         // ---- Track depth ----
+        // `minPrimaryAngle` still drives ascent detection and is what the ledger
+        // signs; it is no longer what decides the rep.
         t.minPrimaryAngle = min(t.minPrimaryAngle, knee)
-        minHipAnkleGap = min(minHipAnkleGap, hipAnkleGap)
-        if knee <= cfg.depthAngle {
+        maxHipDropBelowKnee = max(maxHipDropBelowKnee, hipDrop)
+        if thigh > 0, maxHipDropBelowKnee >= -parallelTolerance * thigh {
             t.reachedDepth = true
             t.transition(to: .atBottom, sink: &events)
         }
@@ -424,12 +449,14 @@ final class SquatAnalyzer: ExerciseAnalyzer {
         // ---- Detect the ascent ----
         let isAscending = knee > t.minPrimaryAngle + cfg.reversalMargin
         if isAscending {
-            // Form check 2: rising while still shallower than `shallowAngle`.
-            if t.minPrimaryAngle > shallowAngle, !t.errorEmitted {
+            // Rising without ever having reached parallel. One check now, where
+            // there used to be two overlapping ones — a `shallowAngle` gate here
+            // and a hip-travel gate at lockout — with a silent band between them
+            // where a rep was neither credited nor explained.
+            if !t.reachedDepth, !t.errorEmitted {
                 t.errorEmitted = true
                 t.transition(to: .invalidRepDetected, sink: &events)
-                events.append(.invalidRep(feedback: "Squat lower! Thighs parallel to the floor.",
-                                          severity: .warning))
+                events.append(.invalidRep(feedback: Self.shallowMessage, severity: .warning))
             } else if !t.errorEmitted {
                 t.transition(to: .ascending, sink: &events)
             }
@@ -438,36 +465,33 @@ final class SquatAnalyzer: ExerciseAnalyzer {
         // ---- Resolve the attempt at standing lockout ----
         if knee >= cfg.lockoutAngle {
             if t.reachedDepth, !t.errorEmitted {
-                if descendedEnough {
-                    t.creditRep(sink: &events)
-                } else {
-                    // Knee angle reached depth but the hips never actually
-                    // dropped relative to the ankles — reject as unverified.
-                    t.errorEmitted = true
-                    events.append(.invalidRep(feedback: "Drop your hips into the squat.",
-                                              severity: .warning))
-                }
+                t.creditRep(sink: &events)
             }
             t.endAttempt()
+            maxHipDropBelowKnee = -.greatestFiniteMagnitude
             t.transition(to: .ready, sink: &events)
         }
 
         return events
     }
 
-    /// Did the hip close enough of its standing gap to the ankle to confirm a
-    /// real descent? FAIL-OPEN: with no valid standing reference it returns
-    /// true, so a missing/degenerate reference never blocks a rep.
-    private var descendedEnough: Bool {
-        guard let standing = standingHipAnkleGap, standing > 0 else { return true }
-        let drop = standing - minHipAnkleGap
-        return drop >= minDescentFraction * standing
+    /// Rep depth as 0...1, from the hip's position relative to the knee.
+    ///
+    /// 0 = standing (hip a full thigh above the knee), 1 = parallel or deeper.
+    /// Expressed in thigh-lengths so it self-scales to the athlete and to how
+    /// far away they set the phone.
+    ///
+    /// Returns 0 for a degenerate thigh rather than dividing by it — a hip
+    /// exactly on top of a knee is broken tracking, and 0 shows an empty ring
+    /// instead of a full one.
+    static func hipDepthProgress(hipDrop: CGFloat, thigh: CGFloat) -> Double {
+        guard thigh > 0, hipDrop.isFinite else { return 0 }
+        return Double(max(0, min(1, 1 + hipDrop / thigh)))
     }
 
     func reset() {
         t.reset()
-        standingHipAnkleGap = nil
-        minHipAnkleGap = .greatestFiniteMagnitude
+        maxHipDropBelowKnee = -.greatestFiniteMagnitude
     }
 }
 
