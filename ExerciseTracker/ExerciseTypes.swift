@@ -118,13 +118,15 @@ public enum ExerciseType: String, CaseIterable {
                 nominalTorsoLeanMax: 55     // torso angle from vertical; beyond this = forward collapse
             )
         case .dips:
-            // Spec: top = elbow near 180° (tolerated 171–180); bottom = elbow at
-            // or under 90° (tolerated to 94.5°). Both fall straight out of the
-            // nominal values below.
+            // Spec §4 relaxation: top = elbow > 165° effective (was a locked
+            // 171°), bottom = elbow <= 98° effective (was a punishing 94.5°).
+            // Nominals are pre-divided by `Tolerance` so the EFFECTIVE values
+            // land on the numbers the spec states: 173.7 * 0.95 = 165.0 and
+            // 93.33 * 1.05 = 98.0.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
-                nominalDepth:        90,    // → 94.5°
-                nominalLockout:      180,   // → 171°, matching the spec's stated 171–180 window
+                nominalDepth:        93.33,   // → 98.0
+                nominalLockout:      173.68,  // → 165.0
                 reversalMargin:      12,
                 // Torso must be clearly vertical/diagonal, not flat — this is the
                 // anti-cheat gate that stops push-ups counting as dips. 50° → 47.5°.
@@ -135,14 +137,14 @@ public enum ExerciseType: String, CaseIterable {
             // rep is VALID is decided by shoulder travel against the locked bar
             // line (see PullUpConfig), not by elbow depth.
             //
-            // The spec asks for "arms fully extend back to 170-180 degrees" on
-            // the descent. Declaring nominal 180 yields a tolerated 171°, which
-            // reproduces that window and stays consistent with dips rather than
-            // introducing a second, slightly different notion of "extended".
+            // Spec §4 relaxation: the dead hang re-arms at > 160° effective
+            // rather than a strict 171°, so an athlete who does not fully lock
+            // out at the bottom still gets their next rep counted. Nominal is
+            // pre-divided by the tolerance: 168.42 * 0.95 = 160.0.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
                 nominalDepth:        90,    // unused as a pass criterion; see above
-                nominalLockout:      180,   // → 171° dead-hang extension
+                nominalLockout:      168.42, // → 160.0 dead-hang extension
                 reversalMargin:      12
             )
         case .plank:
@@ -321,7 +323,12 @@ struct PullUpConfig {
         barZoneMinY:          0.65,                  // upper 35% of frame
         barLockDuration:      1.0,                   // per spec
         barLockStability:     0.03,
-        topTriggerArmFraction: Tolerance.atMost(0.40), // → 0.42, the ±5% applied to a coordinate threshold
+        // Spec §4 relaxation pass: 0.40 → 0.50 of an arm span, so shorter-range
+        // pull-ups count. NOT the spec's literal "15% of upper-arm length" —
+        // that reads as ≈0.075 of an arm span, which is tighter than the 0.35 a
+        // strong rep reaches and would count zero reps forever. See
+        // `BilateralJointsTests.testTopOfARealPullUpDoesNotReachTheBarLine`.
+        topTriggerArmFraction: Tolerance.atMost(0.50), // → 0.525
         barDriftArmFraction:  0.25
     )
 }

@@ -499,7 +499,9 @@ final class SquatAnalyzer: ExerciseAnalyzer {
 
 /// Parallel-bars dip tracker.
 /// Primary joint: elbow (shoulder–elbow–wrist).
-/// Top = arms extended (tolerated 171–180°); bottom = elbow at or under 94.5°.
+/// Top = arms extended (> 165°); bottom = elbow at or under 98°. Both were
+/// relaxed from a stricter 171°/94.5° per spec §4, so a dip that stops a little
+/// short of a full lockout still counts.
 ///
 /// Geometrically a dip and a push-up are the SAME elbow movement — bend, then
 /// straighten — so the only thing separating them is torso ORIENTATION: a dip's
