@@ -346,7 +346,12 @@ public final class SecureWorkoutSession: @unchecked Sendable {
     ///   - joints:          суставы текущего кадра
     ///   - peakDepthAngle:  угол первичного сустава в нижней точке (°)
     ///   - difficultyLevel: уровень сложности (0.0–1.0)
-    public func registerRep(
+    /// NOT `public`: `BodyJoints` is an internal frame snapshot, and Swift
+    /// rejects a public method whose parameter uses an internal type. The
+    /// caller named above lives in this module, so internal is the access level
+    /// this always needed — widening `BodyJoints` to public instead would
+    /// export an implementation detail to satisfy a modifier nothing required.
+    func registerRep(
         joints: BodyJoints,
         peakDepthAngle: Double,
         difficultyLevel: Double = 1.0
