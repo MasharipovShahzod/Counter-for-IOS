@@ -35,6 +35,11 @@
 
 import Foundation
 import Darwin
+// Subsystem [D] scans the process's loaded images via `_dyld_image_count()` and
+// `_dyld_get_image_name()`. Those live in <mach-o/dyld.h> and are NOT
+// re-exported by Darwin on iOS, so without this the dylib check does not
+// compile — which is exactly how it shipped.
+import MachO
 
 // MARK: - Типы угроз целостности
 
