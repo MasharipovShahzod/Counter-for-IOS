@@ -553,7 +553,7 @@ final class DipsAnalyzer: ExerciseAnalyzer {
             }
         }
 
-        // ---- Arm at the top: arms extended, 171–180° ----
+        // ---- Arm at the top: arms extended, 165–180° ----
         if !t.attemptInProgress, elbow >= cfg.lockoutAngle {
             t.arm()
         }

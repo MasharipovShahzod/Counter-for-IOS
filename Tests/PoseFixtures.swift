@@ -290,14 +290,15 @@ enum Pose {
     }
 
     /// The top of a strong, REALISTIC pull-up: shoulders 0.35 of an arm below
-    /// the bar. Clears the 0.42 trigger. Note the shoulders are still well below
+    /// the bar. Clears the 0.525 trigger. Note the shoulders are still well below
     /// the hands — shoulders level with the wrists would be a muscle-up.
     static func pulledUp() -> BilateralJoints {
         pullUp(shoulderY: 0.9 - 0.35 * 0.4, elbowDegrees: 90)   // shoulderY = 0.76
     }
 
     /// A half-hearted pull: shoulders only 0.6 of an arm below the bar, which
-    /// does NOT clear the 0.42 trigger.
+    /// does NOT clear the 0.525 trigger. The margin is narrower now (0.6 vs
+    /// 0.525) than it was against the old 0.42 bound.
     static func partialPull() -> BilateralJoints {
         pullUp(shoulderY: 0.9 - 0.6 * 0.4, elbowDegrees: 120)    // shoulderY = 0.66
     }
