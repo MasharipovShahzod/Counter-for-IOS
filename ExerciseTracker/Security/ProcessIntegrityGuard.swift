@@ -14,9 +14,12 @@
 //  [B] Проверка побега из песочницы
 //      Пробует записать файл в /private/var — запрещено в нормальной среде.
 //
-//  [C] Доступность fork()
-//      На нетронутом устройстве fork() завершается с EPERM. Если он работает —
-//      ядро пропатчено.
+//  [C] УДАЛЕНО — проверка доступности fork()
+//      fork() помечен как unavailable в iOS device SDK, поэтому проверка не
+//      компилировалась на устройстве, а на симуляторе была отключена через
+//      #if targetEnvironment(simulator). Она не могла выполниться ни в одной
+//      конфигурации. Удалена, а не заглушена: неработающая проверка, которая
+//      выглядит рабочей, хуже её отсутствия.
 //
 //  [D] Проверка загруженных dylib
 //      Сканирует все образы процесса через _dyld_get_image_name() на предмет
@@ -46,7 +49,6 @@ import MachO
 public enum IntegrityThreat: CustomStringConvertible {
     case jailbreakFilesFound([String])
     case sandboxEscapeDetected
-    case forkAvailable
     case suspiciousDylibLoaded(name: String)
     case debuggerAttached
 
@@ -56,8 +58,6 @@ public enum IntegrityThreat: CustomStringConvertible {
             return "Файлы джейлбрейка: \(fs.joined(separator: ", "))"
         case .sandboxEscapeDetected:
             return "Запись вне песочницы — устройство взломано"
-        case .forkAvailable:
-            return "fork() доступен — ядро iOS пропатчено"
         case .suspiciousDylibLoaded(let n):
             return "Подозрительная dylib: \(n)"
         case .debuggerAttached:
@@ -245,7 +245,6 @@ public final class ProcessIntegrityGuard {
 
         if let t = checkJailbreakFiles()  { threats.append(t) }
         if checkSandboxEscape()           { threats.append(.sandboxEscapeDetected) }
-        if checkForkAvailability()        { threats.append(.forkAvailable) }
         threats.append(contentsOf: checkLoadedDylibs())
         if checkDebuggerAttached()        { threats.append(.debuggerAttached) }
 
@@ -304,24 +303,6 @@ public final class ProcessIntegrityGuard {
         } catch {
             return false // Нормальное поведение в нетронутой среде
         }
-    }
-
-    // MARK: — [C] Доступность fork()
-
-    private func checkForkAvailability() -> Bool {
-        #if targetEnvironment(simulator)
-        // В симуляторе fork() допустим — это macOS процесс.
-        return false
-        #else
-        let pid = fork()
-        if pid == 0 {
-            // Мы в дочернем процессе — немедленно завершаемся без cleanup.
-            _exit(0)
-        }
-        // pid > 0 → fork() сработал → ядро пропатчено
-        // pid < 0 → EPERM/ENOSYS → нормальное поведение iOS
-        return pid > 0
-        #endif
     }
 
     // MARK: — [D] Проверка загруженных dylib

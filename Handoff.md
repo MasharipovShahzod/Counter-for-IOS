@@ -461,7 +461,6 @@ Authorization : Bearer <sessionToken>
 ```
 checkJailbreakFiles()    → Foundation.fileExists() + fopen()  [21 путь]
 checkSandboxEscape()     → запись в /private/var/
-checkForkAvailability()  → fork() → exit(0) в дочернем; pid > 0 = взлом
 checkLoadedDylibs()      → _dyld_get_image_name() × image_count [16 паттернов]
 checkDebuggerAttached()  → sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID) → P_TRACED
 ```
