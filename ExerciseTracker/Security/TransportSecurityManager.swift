@@ -283,10 +283,16 @@ public final class AppIntegrityChecker: Sendable {
 
         // mobileprovision содержит текстовый plist между CMS-обёртками.
         guard
+            // `range:` takes a `Range<String.Index>?` — there is no overload for
+            // a partial range, so each search is bounded explicitly to the end
+            // of the text. Writing `upperBound...` here did not compile.
             let keyRange   = text.range(of: "<key>TeamIdentifier</key>"),
-            let arrRange   = text.range(of: "<array>",   range: keyRange.upperBound...),
-            let startRange = text.range(of: "<string>",  range: arrRange.upperBound...),
-            let endRange   = text.range(of: "</string>", range: startRange.upperBound...)
+            let arrRange   = text.range(of: "<array>",
+                                        range: keyRange.upperBound..<text.endIndex),
+            let startRange = text.range(of: "<string>",
+                                        range: arrRange.upperBound..<text.endIndex),
+            let endRange   = text.range(of: "</string>",
+                                        range: startRange.upperBound..<text.endIndex)
         else { return nil }
 
         return String(text[startRange.upperBound..<endRange.lowerBound])
