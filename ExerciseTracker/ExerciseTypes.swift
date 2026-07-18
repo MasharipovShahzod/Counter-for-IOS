@@ -120,13 +120,16 @@ public enum ExerciseType: String, CaseIterable {
         case .dips:
             // Spec §4 relaxation: top = elbow > 165° effective (was a locked
             // 171°), bottom = elbow <= 98° effective (was a punishing 94.5°).
-            // Nominals are pre-divided by `Tolerance` so the EFFECTIVE values
-            // land on the numbers the spec states: 173.7 * 0.95 = 165.0 and
-            // 93.33 * 1.05 = 98.0.
+            //
+            // The nominals are written as the DIVISION that inverts `Tolerance`,
+            // not as a hand-rounded decimal, so the effective values land on the
+            // spec's numbers to full precision. Writing 173.68 instead of
+            // 165 / 0.95 yields 164.996, which is visibly "165" in a comment but
+            // fails an exact assertion — and did, on CI.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
-                nominalDepth:        93.33,   // → 98.0
-                nominalLockout:      173.68,  // → 165.0
+                nominalDepth:        98 / 1.05,    // → 98.0 effective
+                nominalLockout:      165 / 0.95,   // → 165.0 effective
                 reversalMargin:      12,
                 // Torso must be clearly vertical/diagonal, not flat — this is the
                 // anti-cheat gate that stops push-ups counting as dips. 50° → 47.5°.
@@ -139,12 +142,13 @@ public enum ExerciseType: String, CaseIterable {
             //
             // Spec §4 relaxation: the dead hang re-arms at > 160° effective
             // rather than a strict 171°, so an athlete who does not fully lock
-            // out at the bottom still gets their next rep counted. Nominal is
-            // pre-divided by the tolerance: 168.42 * 0.95 = 160.0.
+            // out at the bottom still gets their next rep counted. The nominal is
+            // written as the division that inverts `Tolerance` — see the dips
+            // case above for why a hand-rounded decimal is not good enough.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
                 nominalDepth:        90,    // unused as a pass criterion; see above
-                nominalLockout:      168.42, // → 160.0 dead-hang extension
+                nominalLockout:      160 / 0.95,  // → 160.0 effective dead-hang
                 reversalMargin:      12
             )
         case .plank:
