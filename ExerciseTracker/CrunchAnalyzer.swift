@@ -134,8 +134,31 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         // EASIER to reach, so the machine arms and then self-corrects on the
         // next real rest frame. Erring toward arming is the right direction —
         // the failure this replaces was never arming at all.
+        // RATCHETS UPWARD ONLY, and that is the whole subtlety.
+        //
+        // Rest is the EXTENDED position; a crunch closes from it and never opens
+        // past it, so the largest angle seen is the rest posture by definition.
+        // An earlier revision used a plain EMA over every non-attempt frame,
+        // which quietly broke the gates: the first frames of a descent are still
+        // above the lying gate, so they fed the average and dragged rest down —
+        // and since `peakGate = rest - peakClosure`, the target moved DOWN as the
+        // athlete curled toward it. A spec-conformant rep then missed the gate by
+        // a degree and scored nothing. A descent is the start of a rep, not a new
+        // resting posture.
+        //
+        // Downward adaptation is handled by `reset()` and `trackingLost()`
+        // clearing the estimate, so repositioning between sets re-learns cleanly.
         if !attemptInProgress, PoseGeometry.isTrustworthyAngle(hipAngle) {
-            restHipAngle = restHipAngle.map { $0 + Self.restAlpha * (hipAngle - $0) } ?? hipAngle
+            if let current = restHipAngle {
+                if hipAngle > current {
+                    restHipAngle = current + Self.restAlpha * (hipAngle - current)
+                }
+            } else {
+                // Bootstrap. Seeding from the first reading — rather than from a
+                // fixed constant — is what lets an athlete whose rest sits below
+                // the config default arm at all.
+                restHipAngle = hipAngle
+            }
         }
 
         let lyingGate = restHipAngle.map { $0 - cfg.lyingMargin } ?? cfg.lyingHipAngle
