@@ -206,3 +206,80 @@ final class SquatDisplacementTests: XCTestCase {
         XCTAssertEqual(ExerciseType.pullUp.kind, .reps)
     }
 }
+
+// MARK: - Pendulum sway (spec §3: advisory, never blocking)
+
+final class SwayReportingTests: XCTestCase {
+
+    /// Drives the analyzer to a locked bar, armed at the dead hang.
+    private func lockBar(_ a: PullUpAnalyzer, from t: inout TimeInterval) {
+        for _ in 0..<45 {
+            _ = a.analyze(frame: PoseFrame(bilateral: Pose.hang(), time: t))
+            t += 1.0 / 30
+        }
+    }
+
+    @discardableResult
+    private func feed(_ a: PullUpAnalyzer,
+                      _ j: BilateralJoints,
+                      frames: Int = 10,
+                      from t: inout TimeInterval) -> [AnalyzerEvent] {
+        var events: [AnalyzerEvent] = []
+        for _ in 0..<frames {
+            events += a.analyze(frame: PoseFrame(bilateral: j, time: t))
+            t += 1.0 / 30
+        }
+        return events
+    }
+
+    private func sawWarning(_ events: [AnalyzerEvent]) -> Bool {
+        events.contains { e in
+            if case .invalidRep(_, let severity) = e { return severity == .warning }
+            return false
+        }
+    }
+
+    /// Swinging on the bar must be reported. The baseline is frozen at the dead
+    /// hang, so a body that travels 0.12 sideways against a 0.4 arm span clears
+    /// the 15% bound (0.06) comfortably.
+    func testPullUpSwingFiresTheSwayCue() {
+        let a = PullUpAnalyzer()
+        var t: TimeInterval = 0
+        lockBar(a, from: &t)
+        XCTAssertTrue(a.isBarLocked, "precondition: the bar must lock")
+
+        // Open the rep un-swung so the baseline freezes at the true start...
+        feed(a, Pose.pulledUp(), from: &t)
+        // ...then swing.
+        let events = feed(a, Pose.displaced(Pose.pulledUp(), byX: 0.12), from: &t)
+        XCTAssertTrue(sawWarning(events), "pendulum sway must be reported")
+    }
+
+    /// THE NON-BLOCKING GUARANTEE. Sway warns; it must never cost the rep.
+    /// This is the requirement most likely to regress silently, because the
+    /// obvious "fix" for a swinging athlete is to void their rep.
+    func testPullUpSwingDoesNotCancelTheRep() {
+        let a = PullUpAnalyzer()
+        var t: TimeInterval = 0
+        lockBar(a, from: &t)
+
+        feed(a, Pose.pulledUp(), from: &t)
+        feed(a, Pose.displaced(Pose.pulledUp(), byX: 0.12), from: &t)
+        feed(a, Pose.hang(), from: &t)          // return to the hang closes the rep
+
+        XCTAssertEqual(a.successfulReps, 1, "sway warns; it never voids a rep")
+    }
+
+    /// A clean rep must NOT be nagged. A monitor that fires on every rep is
+    /// noise the athlete will learn to ignore, which is worse than silence.
+    func testCleanPullUpDoesNotFireTheSwayCue() {
+        let a = PullUpAnalyzer()
+        var t: TimeInterval = 0
+        lockBar(a, from: &t)
+
+        var events = feed(a, Pose.pulledUp(), from: &t)
+        events += feed(a, Pose.hang(), from: &t)
+        XCTAssertFalse(sawWarning(events), "a straight-line rep must not be flagged")
+        XCTAssertEqual(a.successfulReps, 1)
+    }
+}

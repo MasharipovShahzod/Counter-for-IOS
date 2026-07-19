@@ -296,6 +296,26 @@ enum Pose {
         pullUp(shoulderY: 0.9 - 0.35 * 0.4, elbowDegrees: 90)   // shoulderY = 0.76
     }
 
+    /// The whole body displaced sideways, simulating a pendulum swing.
+    ///
+    /// Every joint moves together, so every ANGLE and the shoulder-to-bar gap
+    /// are preserved exactly — and the bar-lock check compares wrist HEIGHT
+    /// only, so the lock survives too. That isolates the single variable the
+    /// sway monitor exists to measure: lateral travel away from where the rep
+    /// started.
+    static func displaced(_ j: BilateralJoints, byX dx: CGFloat) -> BilateralJoints {
+        func mv(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + dx, y: p.y) }
+        return BilateralJoints(
+            leftShoulder:  mv(j.leftShoulder),
+            rightShoulder: mv(j.rightShoulder),
+            leftElbow:     mv(j.leftElbow),
+            rightElbow:    mv(j.rightElbow),
+            leftWrist:     mv(j.leftWrist),
+            rightWrist:    mv(j.rightWrist),
+            minConfidence: j.minConfidence
+        )
+    }
+
     /// A half-hearted pull: shoulders only 0.6 of an arm below the bar, which
     /// does NOT clear the 0.525 trigger. The margin is narrower now (0.6 vs
     /// 0.525) than it was against the old 0.42 bound.
