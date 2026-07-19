@@ -66,7 +66,11 @@ public enum VoiceCue: String, CaseIterable {
         case .lower:    return "Deeper"
         case .posture:  return "Align"
         case .goodRep:  return "Good"
-        case .grounded: return "Feet up"
+        // One word, per the terse contract — "Feet up" reads naturally but is
+        // two, and `testTersePhrasesAreSingleWords` exists to keep sentences
+        // from creeping into the fallback. "Hang" is the gym cue for exactly
+        // this fault: let the arms take the weight.
+        case .grounded: return "Hang"
         }
     }
 
