@@ -300,6 +300,19 @@ struct BodyJoints {
 
 extension BodyJoints {
 
+    /// Hip→knee distance: the crunch's normalizing scale. Every crunch spatial
+    /// bound is a fraction of this, so the same number holds at any camera
+    /// distance and on any body.
+    var thighLength: CGFloat { PoseGeometry.distance(hip, knee) }
+
+    /// Shoulder→elbow distance. Distinct from `BilateralJoints.armSpan`, which is
+    /// the full shoulder→wrist reach — roughly twice this.
+    var upperArmLength: CGFloat { PoseGeometry.distance(shoulder, elbow) }
+
+    /// Shoulder–hip–knee. The crunch FSM's driving angle, and rotation-invariant
+    /// by construction: it is a property of the body, not of the camera.
+    var hipAngle: CGFloat { PoseGeometry.angle(shoulder, hip, knee) }
+
     /// Builds a `BodyJoints` from an observation, automatically picking the more
     /// visible side. Returns `nil` if neither side clears `minConfidence` for the
     /// joints the given exercise needs.
@@ -350,6 +363,11 @@ extension BodyJoints {
                     // exhaustive; the manager does not build a `BodyJoints` for
                     // pull-ups.
                     return [recognized[0], recognized[1], recognized[2]]
+                case .crunches:
+                    // shoulder, hip, knee — the three joints of the driving
+                    // angle. Elbow/wrist stay optional: hands behind the head or
+                    // across the chest are both normal and both self-occlude.
+                    return [recognized[0], recognized[3], recognized[4]]
                 case .plank:
                     // shoulder, hip, knee, ankle — the full spine-and-legs chain.
                     return [recognized[0], recognized[3], recognized[4], recognized[5]]

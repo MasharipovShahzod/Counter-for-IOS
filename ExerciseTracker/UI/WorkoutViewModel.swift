@@ -382,6 +382,9 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         case .squat:  return "Squat down…"
         case .dips:   return "Dip down…"
         case .pullUp: return "Lower…"
+        // A crunch never enters `.descending` — its FSM curls up from lying via
+        // `.ascending`. This branch exists only to keep the switch exhaustive.
+        case .crunches: return "Lower back down…"
         case .plank:  return "Hold…"
         }
     }
@@ -391,6 +394,7 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         case .pushUp, .dips: return "Press up!"
         case .squat:         return "Stand up!"
         case .pullUp:        return "Pull!"
+        case .crunches:      return "Curl up!"
         case .plank:         return "Hold…"
         }
     }

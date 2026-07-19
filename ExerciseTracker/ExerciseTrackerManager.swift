@@ -513,7 +513,7 @@ public final class ExerciseTrackerManager {
             else { return nil }
             return PoseFrame(bilateral: bilateral, time: time, imageDown: imageDown)
 
-        case .pushUp, .squat, .dips, .plank:
+        case .pushUp, .squat, .dips, .crunches, .plank:
             // Plank applies its own, stricter confidence floor internally
             // (`PlankConfig.minConfidence`) — the spec asks for the timer to
             // start only under high confidence.
