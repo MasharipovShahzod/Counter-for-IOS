@@ -193,19 +193,48 @@ public final class VoiceCoach {
     }
 
     /// Delivers a cue through whichever channel the current mode selects.
+    /// Thread-safe; see `onMain`.
     public func say(_ cue: VoiceCue) {
-        switch mode {
-        case .silent:
-            return
-        case .tone:
-            playTone(cue)
-        case .speech:
-            say(isTerse ? cue.tersePhrase : cue.defaultPhrase)
+        onMain { [weak self] in
+            guard let self = self else { return }
+            switch self.mode {
+            case .silent:
+                return
+            case .tone:
+                self.playTone(cue)
+            case .speech:
+                self.speakOnMain(self.isTerse ? cue.tersePhrase : cue.defaultPhrase)
+            }
         }
     }
 
-    /// Speaks a raw phrase. Debounced per-phrase.
+    /// Hops to the main queue when it isn't already there.
+    ///
+    /// WHY THIS IS NOT OPTIONAL
+    /// -----------------------
+    /// `VoiceCoach` is public API reached through
+    /// `ExerciseTrackerManager.voiceCoach`, so callers outside this module can —
+    /// and eventually will — call `say` from whatever thread they are on.
+    /// `lastSpokenAt` is a plain `Dictionary`: concurrent mutation is undefined
+    /// behaviour and can corrupt its internal storage, not merely drop a
+    /// debounce. `AVSpeechSynthesizer` also expects main-thread use.
+    ///
+    /// The in-tree caller (`ExerciseTrackerManager.deliver`) is already on main,
+    /// so this is a no-op hop there and costs nothing on the hot path.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// Speaks a raw phrase. Debounced per-phrase. Thread-safe.
     public func say(_ phrase: String) {
+        onMain { [weak self] in self?.speakOnMain(phrase) }
+    }
+
+    private func speakOnMain(_ phrase: String) {
         guard mode == .speech else { return }
         let now = Date()
         if let last = lastSpokenAt[phrase], now.timeIntervalSince(last) < cooldown {

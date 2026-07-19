@@ -54,8 +54,10 @@
 
 import Foundation
 import Vision
-import AVFoundation
 import CoreMedia
+// AVFoundation is deliberately NOT imported: every AV* symbol moved into
+// `VoiceCoach` with the voice refactor. CMSampleBuffer comes from CoreMedia and
+// CGImagePropertyOrientation from Vision's re-exports.
 
 // MARK: - Delegate
 

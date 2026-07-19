@@ -402,6 +402,19 @@ struct CrunchConfig {
     /// wildly wrong driving angle.
     let minConfidence: Float
 
+    /// How far below the athlete's OBSERVED rest angle the lying gate sits.
+    /// `lyingHipAngle` is only the bootstrap for this; see
+    /// `CrunchAnalyzer.restHipAngle` for why the gates float with the body.
+    let lyingMargin: CGFloat
+
+    /// How far below rest the peak gate sits — the closure a valid rep requires.
+    ///
+    /// This one is a property of the MOVEMENT, not the athlete, so unlike the
+    /// absolute gates it is genuinely constant: shoulders travelling 40% of a
+    /// thigh length about a ~1.2-thigh torso is 0.4/1.2 rad ≈ 19°, whatever
+    /// posture the athlete starts from.
+    let peakClosure: CGFloat
+
     /// NOT routed through `Tolerance`. These are already the relaxed values the
     /// spec asks for, derived from the shoulder-travel equivalence above; running
     /// them through the ±5% again would drag the two gates toward each other and
@@ -418,11 +431,16 @@ struct CrunchConfig {
     /// lowering `lyingHipAngle` to 126 instead, which is the correct direction —
     /// the band must be carved out of the rest position, where there is slack,
     /// not out of the pass criterion, where there is none.
+    /// The two absolute angles are now only the BOOTSTRAP, used until the
+    /// athlete's own rest posture has been observed. They are kept consistent
+    /// with a 135° rest: 135 − 9 = 126 and 135 − 19 = 116.
     static let standard = CrunchConfig(
         lyingHipAngle:            126,
         peakHipAngle:             116,
         maxHipDriftThighFraction: 0.30,
-        minConfidence:            0.4
+        minConfidence:            0.4,
+        lyingMargin:              9,
+        peakClosure:              19
     )
 }
 

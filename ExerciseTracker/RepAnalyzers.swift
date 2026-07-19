@@ -308,7 +308,10 @@ final class PushUpAnalyzer: ExerciseAnalyzer {
 
         // ---- Track depth ----
         t.minPrimaryAngle = min(t.minPrimaryAngle, elbow)
-        if elbow <= cfg.depthAngle {
+        // `isTrustworthyAngle` first: a degenerate frame yields 0, and
+        // `0 <= depthAngle` is true, so the sentinel meant to reject a broken
+        // frame would instead certify full depth. See PoseGeometry.
+        if PoseGeometry.isTrustworthyAngle(elbow), elbow <= cfg.depthAngle {
             t.reachedDepth = true
             t.transition(to: .atBottom, sink: &events)
         }
@@ -603,7 +606,10 @@ final class DipsAnalyzer: ExerciseAnalyzer {
 
         // ---- Track the dip depth ----
         t.minPrimaryAngle = min(t.minPrimaryAngle, elbow)
-        if elbow <= cfg.depthAngle {
+        // `isTrustworthyAngle` first: a degenerate frame yields 0, and
+        // `0 <= depthAngle` is true, so the sentinel meant to reject a broken
+        // frame would instead certify full depth. See PoseGeometry.
+        if PoseGeometry.isTrustworthyAngle(elbow), elbow <= cfg.depthAngle {
             t.reachedDepth = true
             t.transition(to: .atBottom, sink: &events)
         }

@@ -349,6 +349,72 @@ final class CrunchAnalyzerTests: XCTestCase {
         XCTAssertEqual(a.successfulReps, 1)
     }
 
+    /// THE FAIL-OPEN REGRESSION. `PoseGeometry.angle` returns 0 for coincident
+    /// joints, and `0 <= peakGate` is true — so without an explicit
+    /// trustworthiness check a single degenerate frame during a PARTIAL curl
+    /// sets `reachedPeak`, and the athlete's genuine return to lying then pays
+    /// out a rep that never happened.
+    ///
+    /// `BodyJoints.make` does not catch this: it rejects non-finite points, and
+    /// these are finite, merely coincident.
+    func testDegenerateJointsCannotCreditAPeak() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+
+        // A partial curl, but with the shoulder collapsed onto the hip.
+        let h = CrunchFixtures.halfway()
+        let collapsed = BodyJoints(
+            shoulder: h.hip,              // coincident with the hip -> angle 0
+            elbow: h.elbow, wrist: h.wrist,
+            hip: h.hip, knee: h.knee, ankle: h.ankle,
+            minConfidence: 0.9, side: .right
+        )
+        feed(a, collapsed, from: &t)
+        feed(a, CrunchFixtures.lying(), from: &t)
+
+        XCTAssertEqual(a.successfulReps, 0,
+                       "a degenerate frame must not stand in for a real peak")
+    }
+
+    /// THE BODY-ARCHETYPE REGRESSION. An athlete who sets up with knees drawn
+    /// close rests well below the bootstrap 126 degree lying gate. With fixed
+    /// gates they never arm and count ZERO forever, while the progress ring
+    /// keeps moving so nothing looks broken.
+    ///
+    /// The gates are derived from observed rest, so the required CLOSURE stays
+    /// constant while the absolute angles float with the body.
+    func testKneesDrawnCloseStillCounts() {
+        // Knee rotated up so the REST hip angle is only 112 degrees. Under the
+        // fixed 126 gate this athlete could never arm: 112 >= 126 is false, so
+        // no attempt ever opened and the counter sat at zero permanently while
+        // the progress ring kept moving.
+        let hip  = CGPoint(x: 0.5000, y: 0.4000)
+        let knee = CGPoint(x: 0.5742, y: 0.5836)
+        func pose(_ shoulder: CGPoint) -> BodyJoints {
+            BodyJoints(shoulder: shoulder,
+                       elbow: CGPoint(x: 0.3300, y: 0.3600),
+                       wrist: CGPoint(x: 0.4000, y: 0.3800),
+                       hip: hip, knee: knee,
+                       ankle: CGPoint(x: 0.6200, y: 0.4200),
+                       minConfidence: 0.9, side: .right)
+        }
+        let rest   = pose(CGPoint(x: 0.2624, y: 0.4000))   // 112.00 degrees
+        let curled = pose(CGPoint(x: 0.2865, y: 0.5042))   //  85.99 degrees
+
+        XCTAssertLessThan(rest.hipAngle, CrunchConfig.standard.lyingHipAngle,
+                          "precondition: this rest posture is BELOW the fixed gate")
+
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, rest, frames: 20, from: &t)
+        feed(a, curled, frames: 30, from: &t)
+        feed(a, rest, frames: 20, from: &t)
+
+        XCTAssertEqual(a.successfulReps, 1,
+                       "gates derived from observed rest must count this athlete")
+    }
+
     /// Reset must zero everything, including the filter and the anchor.
     func testResetClearsCountAndState() {
         let a = CrunchAnalyzer()

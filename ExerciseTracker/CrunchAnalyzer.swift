@@ -49,6 +49,31 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
     private var minHipThisRep: CGFloat = .greatestFiniteMagnitude
     private var lastPeak: CGFloat?
 
+    /// This athlete's observed rest hip angle, from which both gates are derived.
+    ///
+    /// WHY THE GATES ARE NOT FIXED ANGLES
+    /// ----------------------------------
+    /// Rest posture varies enormously with knee position: knees drawn close can
+    /// rest near 110°, legs straight near 180°. Fixed gates of 126/116 assume a
+    /// 135° rest, so an athlete who sets up with knees close never reaches the
+    /// lying gate, never arms, and counts ZERO forever — while the progress ring
+    /// keeps moving, so nothing looks broken. One with straight legs faces the
+    /// opposite problem and must perform a full sit-up to register.
+    ///
+    /// Every other spatial threshold in this tracker is normalized to the
+    /// athlete (arm span at the dead hang, thigh length for drift). These two
+    /// were the exception, and this closes that gap: the required CLOSURE
+    /// (`peakClosure`) is a property of the movement and stays constant, while
+    /// the absolute angles float with the body.
+    ///
+    /// `nil` until a trustworthy angle has been seen; the config's fixed values
+    /// are the bootstrap.
+    private var restHipAngle: CGFloat?
+
+    /// Slow, because rest is a posture rather than an event and a fast filter
+    /// here would let the gates chase the curl they are supposed to judge.
+    private static let restAlpha: CGFloat = 0.1
+
     // Per-joint coordinate filters.
     //
     // BETA IS SCALED FOR NORMALIZED COORDINATES, and that is why it looks huge
@@ -102,13 +127,31 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         let thigh = PoseGeometry.distance(hip, knee)
         guard thigh > 0 else { return events }
 
-        let isLying = hipAngle >= cfg.lyingHipAngle
-        let isAtPeak = hipAngle <= cfg.peakHipAngle
+        // ---- Learn this athlete's rest posture ----
+        // Sampled only while no attempt is open, which after the first rep means
+        // genuinely-lying frames. Before the first arm it samples whatever it
+        // sees, which is the bootstrap: a low reading there makes the lying gate
+        // EASIER to reach, so the machine arms and then self-corrects on the
+        // next real rest frame. Erring toward arming is the right direction —
+        // the failure this replaces was never arming at all.
+        if !attemptInProgress, PoseGeometry.isTrustworthyAngle(hipAngle) {
+            restHipAngle = restHipAngle.map { $0 + Self.restAlpha * (hipAngle - $0) } ?? hipAngle
+        }
 
-        // ---- Progress ring: 0 flat, 1 at peak contraction ----
-        let span = cfg.lyingHipAngle - cfg.peakHipAngle
+        let lyingGate = restHipAngle.map { $0 - cfg.lyingMargin } ?? cfg.lyingHipAngle
+        let peakGate  = restHipAngle.map { $0 - cfg.peakClosure } ?? cfg.peakHipAngle
+
+        let isLying = hipAngle >= lyingGate
+        // `isTrustworthyAngle` FIRST. A degenerate frame yields 0, and
+        // `0 <= peakGate` is true — so the sentinel that rejects a broken frame
+        // everywhere else would here certify the deepest possible contraction,
+        // and one such frame mid-curl is enough to pay out a half-rep.
+        let isAtPeak = PoseGeometry.isTrustworthyAngle(hipAngle) && hipAngle <= peakGate
+
+        // ---- Progress ring: 0 at rest, 1 at peak contraction ----
+        let span = lyingGate - peakGate
         if span > 0 {
-            let progress = (cfg.lyingHipAngle - hipAngle) / span
+            let progress = (lyingGate - hipAngle) / span
             events.append(.depthProgress(Double(max(0, min(1, progress)))))
         }
 
@@ -172,6 +215,7 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         reachedPeak = false
         minHipThisRep = .greatestFiniteMagnitude
         isArmed = false
+        restHipAngle = nil
         shoulderFilter.reset()
         hipFilter.reset()
         kneeFilter.reset()
@@ -194,6 +238,10 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         reachedPeak = false
         minHipThisRep = .greatestFiniteMagnitude
         lastPeak = nil
+        // Re-learn rest from scratch: a reset means a new set, and the athlete
+        // may well have repositioned. A stale rest that is too LOW would lower
+        // the peak gate and over-count, so the conservative move is to forget it.
+        restHipAngle = nil
         shoulderFilter.reset()
         hipFilter.reset()
         kneeFilter.reset()

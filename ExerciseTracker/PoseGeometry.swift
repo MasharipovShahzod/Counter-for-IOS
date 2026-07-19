@@ -40,15 +40,57 @@ enum PoseGeometry {
         p.x.isFinite && p.y.isFinite
     }
 
+    /// The floor below which a value from `angle(_:_:_:)` is not a measurement.
+    ///
+    /// No human joint in the chains this tracker measures folds below a few
+    /// degrees, so anything smaller is the degenerate sentinel, not a pose.
+    static let minTrustworthyAngle: CGFloat = 5
+
+    /// True when a value from `angle(_:_:_:)` reflects a real measurement.
+    ///
+    /// WHY CALLERS MUST ASK RATHER THAN TRUST THE SENTINEL
+    /// ---------------------------------------------------
+    /// `angle` returns 0 for coincident or non-finite joints, and the comment
+    /// there calls that fail-closed. It is — but ONLY for gates shaped
+    /// `angle >= threshold`, such as a lockout or an alignment minimum.
+    ///
+    /// A depth or peak gate is shaped `angle <= threshold`, and `0 <= 98` is
+    /// TRUE. For those the same sentinel fails wide OPEN: the value that exists
+    /// to reject a broken frame instead certifies the deepest possible rep. One
+    /// degenerate frame mid-attempt is enough to set `reachedDepth`, and the
+    /// athlete's genuine return to lockout then pays out a rep that never
+    /// achieved depth.
+    ///
+    /// `BodyJoints.make` does not save us: it rejects only NON-FINITE points, so
+    /// coincident-but-finite joints — routine on a self-occluded lying pose —
+    /// pass every upstream guard and reach the analyzers intact.
+    ///
+    /// So every `<=` angle gate must call this first. See
+    /// `CrunchAnalyzerTests.testDegenerateJointsCannotCreditAPeak`.
+    static func isTrustworthyAngle(_ degrees: CGFloat) -> Bool {
+        degrees.isFinite && degrees > minTrustworthyAngle
+    }
+
     /// Interior angle (in degrees) at vertex `b`, formed by the segments
     /// b→a and b→c. Range 0...180.
     ///
     /// Used for every joint angle in the tracker, e.g. the elbow angle is
     /// `angle(shoulder, elbow, wrist)`.
     ///
-    /// Returns 0 for non-finite or degenerate input: 0 reads as "fully bent",
-    /// which fails the depth/lockout/alignment comparisons rather than passing
-    /// them. See the fail-closed contract on `isFinite`.
+    /// Returns 0 for non-finite or degenerate input.
+    ///
+    /// READ THIS BEFORE COMPARING THE RESULT. This comment used to claim the 0
+    /// sentinel "fails the depth/lockout/alignment comparisons rather than
+    /// passing them". That is only half true, and the false half was a live
+    /// rep-inflation bug:
+    ///
+    ///   • `angle >= lockout` and `angle < alignmentMin` — 0 FAILS. Fail-closed,
+    ///     as intended.
+    ///   • `angle <= depth` / `angle <= peak` — `0 <= 98` is TRUE, so 0 PASSES.
+    ///     Fail-OPEN: a broken frame certifies the deepest possible rep.
+    ///
+    /// Every `<=` comparison must therefore be guarded by `isTrustworthyAngle`
+    /// first. See that method for the full reasoning.
     static func angle(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
         guard isFinite(a), isFinite(b), isFinite(c) else { return 0 }
 
@@ -298,6 +340,15 @@ struct BodyJoints {
     enum Side { case left, right }
 }
 
+/// Invariant joint-name lists, allocated once for the process rather than twice
+/// per frame inside `BodyJoints.make`. Order is fixed and load-bearing:
+/// [shoulder, elbow, wrist, hip, knee, ankle] — the `mandatory` switch indexes
+/// into it positionally.
+private let leftJointNames: [VNHumanBodyPoseObservation.JointName] =
+    [.leftShoulder, .leftElbow, .leftWrist, .leftHip, .leftKnee, .leftAnkle]
+private let rightJointNames: [VNHumanBodyPoseObservation.JointName] =
+    [.rightShoulder, .rightElbow, .rightWrist, .rightHip, .rightKnee, .rightAnkle]
+
 extension BodyJoints {
 
     /// Hip→knee distance: the crunch's normalizing scale. Every crunch spatial
@@ -325,18 +376,20 @@ extension BodyJoints {
                      for exercise: ExerciseType,
                      minConfidence: Float) -> BodyJoints? {
 
+        // HOISTED OUT OF `side`, which runs twice per frame.
+        //
+        // `recognizedPoints(.all)` builds and returns a dictionary of every
+        // recognized joint. Calling it inside `side` meant paying for that twice
+        // on every single frame — at 30fps, 60 needless dictionary builds a
+        // second — to obtain the identical result both times. The joint-name
+        // lists are likewise invariant and now live as static storage instead of
+        // being rebuilt per side per frame.
+        guard let points = try? observation.recognizedPoints(.all) else { return nil }
+
         // Required joints differ slightly per exercise; we still read all six
         // because both analyzers benefit from the full chain.
         func side(_ s: Side) -> BodyJoints? {
-            let names: [VNHumanBodyPoseObservation.JointName]
-            switch s {
-            case .left:
-                names = [.leftShoulder, .leftElbow, .leftWrist, .leftHip, .leftKnee, .leftAnkle]
-            case .right:
-                names = [.rightShoulder, .rightElbow, .rightWrist, .rightHip, .rightKnee, .rightAnkle]
-            }
-
-            guard let points = try? observation.recognizedPoints(.all) else { return nil }
+            let names = (s == .left) ? leftJointNames : rightJointNames
             let recognized = names.compactMap { points[$0] }
             guard recognized.count == names.count else { return nil }
 
@@ -374,8 +427,10 @@ extension BodyJoints {
                 }
             }()
 
-            guard let weakest = mandatory.map({ $0.confidence }).min(),
-                  weakest >= minConfidence else { return nil }
+            // Allocation-free min: `map` built a throwaway array every frame.
+            var weakest: Float = .greatestFiniteMagnitude
+            for p in mandatory { weakest = min(weakest, p.confidence) }
+            guard weakest >= minConfidence else { return nil }
 
             // Reject the whole frame if any mandatory joint is non-finite.
             // This is the primary fail-closed gate: dropping the frame here
