@@ -279,6 +279,7 @@ public final class ExerciseTrackerManager {
         case .squat:  return SquatAnalyzer()
         case .dips:   return DipsAnalyzer()
         case .pullUp: return PullUpAnalyzer()
+        case .crunches: return CrunchAnalyzer()
         case .plank:  return PlankAnalyzer()
         }
     }

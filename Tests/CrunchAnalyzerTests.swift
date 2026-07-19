@@ -126,3 +126,132 @@ enum CrunchFixtures {
                           minConfidence: j.minConfidence, side: j.side)
     }
 }
+
+// MARK: - FSM
+
+final class CrunchAnalyzerTests: XCTestCase {
+
+    /// Feeds one pose repeatedly so the 1€ filter settles, and collects events.
+    @discardableResult
+    private func feed(_ a: CrunchAnalyzer,
+                      _ j: BodyJoints,
+                      frames: Int = 12,
+                      from t: inout TimeInterval) -> [AnalyzerEvent] {
+        var events: [AnalyzerEvent] = []
+        for _ in 0..<frames {
+            events += a.analyze(frame: PoseFrame(unilateral: j, time: t))
+            t += 1.0 / 30
+        }
+        return events
+    }
+
+    private func repCount(_ events: [AnalyzerEvent]) -> Int {
+        events.reduce(0) { n, e in
+            if case .repCompleted = e { return n + 1 }
+            return n
+        }
+    }
+
+    private func sawWarning(_ events: [AnalyzerEvent]) -> Bool {
+        events.contains { e in
+            if case .invalidRep(_, let severity) = e { return severity == .warning }
+            return false
+        }
+    }
+
+    /// THE HAPPY PATH: lying → peak → lying credits exactly one rep.
+    func testFullCycleCountsOneRep() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        feed(a, CrunchFixtures.peak(), from: &t)
+        let closing = feed(a, CrunchFixtures.lying(), from: &t)
+        XCTAssertEqual(repCount(closing), 1)
+        XCTAssertEqual(a.successfulReps, 1)
+    }
+
+    /// Returning to lying without ever reaching the peak is a half-rep. It must
+    /// not count.
+    func testPartialCurlDoesNotCount() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        feed(a, CrunchFixtures.halfway(), from: &t)
+        feed(a, CrunchFixtures.lying(), from: &t)
+        XCTAssertEqual(a.successfulReps, 0)
+    }
+
+    /// ARMING. Walking into frame already curled up must not pay out a rep on
+    /// the way down — a repetition starts at the start position, by definition.
+    func testStartingAtThePeakDoesNotCreditARep() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.peak(), from: &t)      // never seen lying
+        feed(a, CrunchFixtures.lying(), from: &t)
+        XCTAssertEqual(a.successfulReps, 0)
+    }
+
+    /// Three clean cycles, three reps. Catches a machine that credits on every
+    /// frame at the top or fails to re-arm.
+    func testThreeCyclesCountThreeReps() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        for _ in 0..<3 {
+            feed(a, CrunchFixtures.peak(), from: &t)
+            feed(a, CrunchFixtures.lying(), from: &t)
+        }
+        XCTAssertEqual(a.successfulReps, 3)
+    }
+
+    /// THE PHONE-TILT GUARANTEE, end to end. The same repetition filmed with the
+    /// phone propped at 45° must produce the same count. A floor-relative
+    /// driving angle fails this test; that is why it exists.
+    func testRepCountIsUnchangedByPhoneTilt() {
+        func count(tilt: CGFloat) -> Int {
+            let a = CrunchAnalyzer()
+            var t: TimeInterval = 0
+            feed(a, CrunchFixtures.rotated(CrunchFixtures.lying(), byDegrees: tilt), from: &t)
+            feed(a, CrunchFixtures.rotated(CrunchFixtures.peak(), byDegrees: tilt), from: &t)
+            feed(a, CrunchFixtures.rotated(CrunchFixtures.lying(), byDegrees: tilt), from: &t)
+            return a.successfulReps
+        }
+        XCTAssertEqual(count(tilt: 0), 1)
+        XCTAssertEqual(count(tilt: 45), 1, "a 45-degree phone tilt must not change the count")
+        XCTAssertEqual(count(tilt: -30), 1)
+    }
+
+    /// Sliding on the mat during the ascent fires the sway cue...
+    func testHipSlideDuringAscentFiresTheSwayCue() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        let slidPeak = CrunchFixtures.slid(CrunchFixtures.peak(), byX: 0.12)
+        let events = feed(a, slidPeak, from: &t)
+        XCTAssertTrue(sawWarning(events), "structural drift must be reported")
+    }
+
+    /// ...but MUST NOT cost the athlete the rep. This is the spec's
+    /// non-blocking requirement, and the one most likely to regress silently.
+    func testSwayCueDoesNotCancelTheRep() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        feed(a, CrunchFixtures.slid(CrunchFixtures.peak(), byX: 0.12), from: &t)
+        feed(a, CrunchFixtures.slid(CrunchFixtures.lying(), byX: 0.12), from: &t)
+        XCTAssertEqual(a.successfulReps, 1, "sway warns; it never voids a rep")
+    }
+
+    /// Reset must zero everything, including the filter and the anchor.
+    func testResetClearsCountAndState() {
+        let a = CrunchAnalyzer()
+        var t: TimeInterval = 0
+        feed(a, CrunchFixtures.lying(), from: &t)
+        feed(a, CrunchFixtures.peak(), from: &t)
+        feed(a, CrunchFixtures.lying(), from: &t)
+        XCTAssertEqual(a.successfulReps, 1)
+        a.reset()
+        XCTAssertEqual(a.successfulReps, 0)
+        XCTAssertEqual(a.state, .ready)
+    }
+}
