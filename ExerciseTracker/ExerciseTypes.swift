@@ -63,24 +63,26 @@ public enum ExerciseType: String, CaseIterable {
     case squat
     case dips
     case pullUp
+    case crunches
     case plank
 
     /// Kept short deliberately — `ExercisePickerView` lays these out as equal
     /// segments in a fixed-width capsule, and long labels truncate.
     public var displayName: String {
         switch self {
-        case .pushUp: return "Push-ups"
-        case .squat:  return "Squats"
-        case .dips:   return "Dips"
-        case .pullUp: return "Pull-ups"
-        case .plank:  return "Plank"
+        case .pushUp:   return "Push-ups"
+        case .squat:    return "Squats"
+        case .dips:     return "Dips"
+        case .pullUp:   return "Pull-ups"
+        case .crunches: return "Crunches"
+        case .plank:    return "Plank"
         }
     }
 
     public var kind: ExerciseKind {
         switch self {
-        case .pushUp, .squat, .dips, .pullUp: return .reps
-        case .plank:                          return .hold
+        case .pushUp, .squat, .dips, .pullUp, .crunches: return .reps
+        case .plank:                                     return .hold
         }
     }
 
@@ -118,13 +120,18 @@ public enum ExerciseType: String, CaseIterable {
                 nominalTorsoLeanMax: 55     // torso angle from vertical; beyond this = forward collapse
             )
         case .dips:
-            // Spec: top = elbow near 180° (tolerated 171–180); bottom = elbow at
-            // or under 90° (tolerated to 94.5°). Both fall straight out of the
-            // nominal values below.
+            // Spec §4 relaxation: top = elbow > 165° effective (was a locked
+            // 171°), bottom = elbow <= 98° effective (was a punishing 94.5°).
+            //
+            // The nominals are written as the DIVISION that inverts `Tolerance`,
+            // not as a hand-rounded decimal, so the effective values land on the
+            // spec's numbers to full precision. Writing 173.68 instead of
+            // 165 / 0.95 yields 164.996, which is visibly "165" in a comment but
+            // fails an exact assertion — and did, on CI.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
-                nominalDepth:        90,    // → 94.5°
-                nominalLockout:      180,   // → 171°, matching the spec's stated 171–180 window
+                nominalDepth:        98 / 1.05,    // → 98.0 effective
+                nominalLockout:      165 / 0.95,   // → 165.0 effective
                 reversalMargin:      12,
                 // Torso must be clearly vertical/diagonal, not flat — this is the
                 // anti-cheat gate that stops push-ups counting as dips. 50° → 47.5°.
@@ -135,14 +142,27 @@ public enum ExerciseType: String, CaseIterable {
             // rep is VALID is decided by shoulder travel against the locked bar
             // line (see PullUpConfig), not by elbow depth.
             //
-            // The spec asks for "arms fully extend back to 170-180 degrees" on
-            // the descent. Declaring nominal 180 yields a tolerated 171°, which
-            // reproduces that window and stays consistent with dips rather than
-            // introducing a second, slightly different notion of "extended".
+            // Spec §4 relaxation: the dead hang re-arms at > 160° effective
+            // rather than a strict 171°, so an athlete who does not fully lock
+            // out at the bottom still gets their next rep counted. The nominal is
+            // written as the division that inverts `Tolerance` — see the dips
+            // case above for why a hand-rounded decimal is not good enough.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
                 nominalDepth:        90,    // unused as a pass criterion; see above
-                nominalLockout:      180,   // → 171° dead-hang extension
+                nominalLockout:      160 / 0.95,  // → 160.0 effective dead-hang
+                reversalMargin:      12
+            )
+        case .crunches:
+            // Crunches are judged on the HIP angle against `CrunchConfig`, not on
+            // this struct — exactly as squats are judged on hip-vs-knee height
+            // and pull-ups on shoulder travel. The declaration exists because the
+            // manager's `.reps` path expects a non-nil value; its angles are
+            // deliberately unread by `CrunchAnalyzer`.
+            return ExerciseThresholds(
+                nominalDescentStart: 150,
+                nominalDepth:        90,
+                nominalLockout:      170,
                 reversalMargin:      12
             )
         case .plank:
@@ -321,8 +341,106 @@ struct PullUpConfig {
         barZoneMinY:          0.65,                  // upper 35% of frame
         barLockDuration:      1.0,                   // per spec
         barLockStability:     0.03,
-        topTriggerArmFraction: Tolerance.atMost(0.40), // → 0.42, the ±5% applied to a coordinate threshold
+        // Spec §4 relaxation pass: 0.40 → 0.50 of an arm span, so shorter-range
+        // pull-ups count. NOT the spec's literal "15% of upper-arm length" —
+        // that reads as ≈0.075 of an arm span, which is tighter than the 0.35 a
+        // strong rep reaches and would count zero reps forever. See
+        // `BilateralJointsTests.testTopOfARealPullUpDoesNotReachTheBarLine`.
+        topTriggerArmFraction: Tolerance.atMost(0.50), // → 0.525
         barDriftArmFraction:  0.25
+    )
+}
+
+// MARK: - Crunch configuration
+
+/// Geometry for the crunch, driven ENTIRELY by the rotation-invariant hip angle
+/// (shoulder–hip–knee).
+///
+/// WHY NOT A TORSO-TO-FLOOR ANGLE
+/// ------------------------------
+/// The obvious way to measure a crunch is how far the torso has lifted off the
+/// floor — but "the floor" in image space is only the floor when the phone is
+/// upright. Propped at 45° against a water bottle, which is how this is actually
+/// filmed, every floor-relative angle shifts by 45° and the FSM either fires
+/// permanently or never fires at all. Gravity from CoreMotion would fix the tilt
+/// but not the case where the phone is too flat for the projection to be trusted
+/// (`PoseGeometry.imageDown` returns nil there, and lying-down framing is exactly
+/// when that happens).
+///
+/// The shoulder–hip–knee angle sidesteps all of it: it is a property of the body
+/// alone, so rotating the camera cannot change it. See
+/// `CrunchGeometryTests.testHipAngleIsRotationInvariant`.
+struct CrunchConfig {
+
+    /// Hip angle at or above which the athlete counts as flat/lying, re-arming
+    /// the machine for the next rep.
+    ///
+    /// A flat-lying athlete with knees bent and feet planted sits near 135°. The
+    /// gate is set below that — the "soft buffer near flat extension" the spec
+    /// asks for — so a rep re-arms without demanding the athlete flatten out
+    /// perfectly between reps.
+    let lyingHipAngle: CGFloat
+
+    /// Hip angle at or below which the athlete counts as at peak contraction.
+    ///
+    /// DERIVED FROM THE SPEC'S OWN EQUIVALENCE. The spec defines the peak as the
+    /// shoulders travelling forward past 40% of thigh length. The shoulders swing
+    /// about the hip on a radius of the torso length, which runs ≈1.2 thigh
+    /// lengths, so that arc is 0.4 / 1.2 ≈ 0.33 rad ≈ 19° of hip closure. From a
+    /// 135° flat-lying start that lands at ≈116°; 112° is used to hold a real
+    /// hysteresis band against `lyingHipAngle` (see `minimumHysteresisBand` — the
+    /// same collapse-and-invert failure applies here).
+    let peakHipAngle: CGFloat
+
+    /// Allowed hip slide away from the frozen lying baseline, as a fraction of
+    /// thigh length, before the sway cue fires. Normalized so it holds at any
+    /// camera distance.
+    let maxHipDriftThighFraction: CGFloat
+
+    /// Per-joint confidence floor. Higher than the global 0.3 default because a
+    /// lying athlete self-occludes badly and a low-confidence hip produces a
+    /// wildly wrong driving angle.
+    let minConfidence: Float
+
+    /// How far below the athlete's OBSERVED rest angle the lying gate sits.
+    /// `lyingHipAngle` is only the bootstrap for this; see
+    /// `CrunchAnalyzer.restHipAngle` for why the gates float with the body.
+    let lyingMargin: CGFloat
+
+    /// How far below rest the peak gate sits — the closure a valid rep requires.
+    ///
+    /// This one is a property of the MOVEMENT, not the athlete, so unlike the
+    /// absolute gates it is genuinely constant: shoulders travelling 40% of a
+    /// thigh length about a ~1.2-thigh torso is 0.4/1.2 rad ≈ 19°, whatever
+    /// posture the athlete starts from.
+    let peakClosure: CGFloat
+
+    /// NOT routed through `Tolerance`. These are already the relaxed values the
+    /// spec asks for, derived from the shoulder-travel equivalence above; running
+    /// them through the ±5% again would drag the two gates toward each other and
+    /// collapse the hysteresis band, which is the exact failure `Tolerance`'s own
+    /// documentation warns about.
+    /// UNVALIDATED ON DEVICE. Both angles are derived from the spec's stated
+    /// shoulder-travel equivalence and checked against synthetic fixtures — no
+    /// filmed crunch has ever exercised them. Re-tune before release.
+    ///
+    /// `peakHipAngle` is 116, NOT the tighter 112 first written here. The
+    /// derivation above lands a spec-conformant rep at ≈115.9°, so a 112° gate
+    /// sat about 4° INSIDE the movement the spec describes: an athlete doing
+    /// exactly what was asked scored zero. The hysteresis band is preserved by
+    /// lowering `lyingHipAngle` to 126 instead, which is the correct direction —
+    /// the band must be carved out of the rest position, where there is slack,
+    /// not out of the pass criterion, where there is none.
+    /// The two absolute angles are now only the BOOTSTRAP, used until the
+    /// athlete's own rest posture has been observed. They are kept consistent
+    /// with a 135° rest: 135 − 9 = 126 and 135 − 19 = 116.
+    static let standard = CrunchConfig(
+        lyingHipAngle:            126,
+        peakHipAngle:             116,
+        maxHipDriftThighFraction: 0.30,
+        minConfidence:            0.4,
+        lyingMargin:              9,
+        peakClosure:              19
     )
 }
 

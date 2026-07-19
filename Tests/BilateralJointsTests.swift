@@ -136,10 +136,27 @@ final class BilateralJointsTests: XCTestCase {
                           "shoulders never reach the bar in a standard pull-up — "
                               + "the spec's literal trigger would count zero reps")
 
-        // The calibrated trigger (Phase 3) fires on this rep; the literal one doesn't.
+        // The calibrated trigger fires on this rep; the literal one doesn't.
+        //
+        // The bound moved 0.40 → 0.50 per spec §4's relaxation pass. The spec's
+        // literal text ("< 15% of upper-arm length") was NOT adopted: an upper
+        // arm is about half an arm span, so that reads as ≈0.075 of a span —
+        // roughly 5x tighter than this strong rep at 0.35, and about 25x tighter
+        // than the 1.0 of a dead hang. It would count zero reps forever, which is
+        // the same muscle-up mistake this test was written to prevent.
         let deadHangSpan: CGFloat = 0.4
         let gapInArms = (top.meanWristY - top.meanShoulderY) / deadHangSpan
         XCTAssertEqual(gapInArms, 0.35, accuracy: acc)
-        XCTAssertLessThan(gapInArms, 0.4, "clears the planned 40%-of-arm trigger")
+        XCTAssertLessThan(gapInArms, PullUpConfig.standard.topTriggerArmFraction,
+                          "a strong rep must clear the relaxed 50%-of-arm trigger")
+    }
+
+    /// The relaxed trigger must still reject a dead hang. Relaxation that reaches
+    /// all the way down to "hanging still counts" would make the counter free.
+    func testRelaxedTriggerStillRejectsADeadHang() {
+        let j = deadHang()
+        let gapInArms = (j.meanWristY - j.meanShoulderY) / j.armSpan
+        XCTAssertGreaterThan(gapInArms, PullUpConfig.standard.topTriggerArmFraction,
+                             "a dead hang must never satisfy the top trigger")
     }
 }

@@ -65,14 +65,14 @@ final class PoseGeometryTests: XCTestCase {
     }
 
     func testNonFiniteInputFailsClosed() {
-        let nan = PoseGeometry.angle(CGPoint(x: .nan, y: 0),
+        let nan = PoseGeometry.angle(CGPoint(x: CGFloat.nan, y: 0),
                                      CGPoint(x: 1, y: 0),
                                      CGPoint(x: 2, y: 0))
         XCTAssertEqual(nan, 0, accuracy: acc)
         XCTAssertFalse(nan.isNaN, "NaN must be absorbed, never propagated")
 
         let inf = PoseGeometry.angle(CGPoint(x: 0, y: 0),
-                                     CGPoint(x: .infinity, y: 0),
+                                     CGPoint(x: CGFloat.infinity, y: 0),
                                      CGPoint(x: 2, y: 0))
         XCTAssertEqual(inf, 0, accuracy: acc)
         XCTAssertFalse(inf.isNaN)
@@ -128,7 +128,7 @@ final class PoseGeometryTests: XCTestCase {
     }
 
     func testTorsoPitchNonFiniteFailsClosed() {
-        let pitch = PoseGeometry.torsoPitch(shoulder: CGPoint(x: .nan, y: 0.5),
+        let pitch = PoseGeometry.torsoPitch(shoulder: CGPoint(x: CGFloat.nan, y: 0.5),
                                             hip: CGPoint(x: 1, y: 0.5))
         XCTAssertEqual(pitch, 90, accuracy: acc)
     }
@@ -178,7 +178,7 @@ final class PoseGeometryTests: XCTestCase {
     }
 
     func testDistanceNonFiniteIsZero() {
-        let d = PoseGeometry.distance(CGPoint(x: .nan, y: 0), CGPoint(x: 3, y: 4))
+        let d = PoseGeometry.distance(CGPoint(x: CGFloat.nan, y: 0), CGPoint(x: 3, y: 4))
         XCTAssertEqual(d, 0, accuracy: acc)
     }
 
@@ -186,9 +186,9 @@ final class PoseGeometryTests: XCTestCase {
 
     func testIsFinite() {
         XCTAssertTrue(PoseGeometry.isFinite(CGPoint(x: 0.5, y: 0.5)))
-        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: .nan, y: 0.5)))
-        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: 0.5, y: .nan)))
-        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: .infinity, y: 0.5)))
-        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: 0.5, y: -.infinity)))
+        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: CGFloat.nan, y: 0.5)))
+        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: 0.5, y: CGFloat.nan)))
+        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: CGFloat.infinity, y: 0.5)))
+        XCTAssertFalse(PoseGeometry.isFinite(CGPoint(x: 0.5, y: -CGFloat.infinity)))
     }
 }

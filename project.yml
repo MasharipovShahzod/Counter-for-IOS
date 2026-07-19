@@ -22,7 +22,10 @@ targets:
       properties:
         CFBundleDisplayName: Fitness Tracker
         # Required — the app crashes on camera start without this.
-        NSCameraUsageDescription: Used to count your push-ups and squats.
+        # Shown verbatim in the iOS permission prompt, so it should name what the
+        # app actually tracks. It said "push-ups and squats" while the tracker
+        # also counts dips, pull-ups, crunches and the plank.
+        NSCameraUsageDescription: Used to count your reps and check your form.
         UILaunchScreen: {}
         # Portrait-only, and the tracker depends on it: the orientation handed to
         # Vision (`.right`) and the gravity→image projection in

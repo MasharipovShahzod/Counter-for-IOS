@@ -186,12 +186,12 @@ final class PushUpAnalyzerTests: XCTestCase {
     /// the frame first), but if one ever did, it must not credit a rep.
     func testNonFiniteJointsCannotCreditARep() {
         let a = PushUpAnalyzer()
-        let broken = BodyJoints(shoulder: CGPoint(x: .nan, y: .nan),
-                                elbow: CGPoint(x: .nan, y: .nan),
-                                wrist: CGPoint(x: .nan, y: .nan),
-                                hip: CGPoint(x: .nan, y: .nan),
-                                knee: CGPoint(x: .nan, y: .nan),
-                                ankle: CGPoint(x: .nan, y: .nan),
+        let broken = BodyJoints(shoulder: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
+                                elbow: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
+                                wrist: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
+                                hip: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
+                                knee: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
+                                ankle: CGPoint(x: CGFloat.nan, y: CGFloat.nan),
                                 minConfidence: 0.9, side: .right)
         feed(a, broken, frames: 30)
         XCTAssertEqual(a.successfulReps, 0)

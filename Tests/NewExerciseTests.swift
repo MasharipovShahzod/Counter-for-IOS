@@ -15,8 +15,8 @@ final class DipsAnalyzerTests: XCTestCase {
 
     func testFullDipCountsOnce() {
         let a = DipsAnalyzer()
-        feed(a, Pose.dips(elbow: 175))          // top: arms extended, inside 171–180
-        feed(a, Pose.dips(elbow: 85))           // bottom: past the 94.5° trigger
+        feed(a, Pose.dips(elbow: 175))          // top: arms extended, inside 165–180
+        feed(a, Pose.dips(elbow: 85))           // bottom: past the 98° trigger
         let events = feed(a, Pose.dips(elbow: 175))   // back to the top
 
         XCTAssertEqual(events.repCounts.last, 1, "Top → Bottom → Top is one rep")
@@ -24,28 +24,28 @@ final class DipsAnalyzerTests: XCTestCase {
     }
 
     /// The spec's stated window: the top phase must be reachable anywhere in
-    /// 171–180°, not only at a perfect 180.
+    /// 165–180°, not only at a perfect 180.
     func testTopPhaseAcceptsTheWholeToleratedWindow() {
         let cfg = ExerciseType.dips.repThresholds!
-        XCTAssertEqual(cfg.lockoutAngle, 171, accuracy: 0.0001)
+        XCTAssertEqual(cfg.lockoutAngle, 165, accuracy: 0.0001)
 
         let a = DipsAnalyzer()
-        feed(a, Pose.dips(elbow: 172))   // barely inside the window — must arm
+        feed(a, Pose.dips(elbow: 166))   // barely inside the window — must arm
         feed(a, Pose.dips(elbow: 85))
-        feed(a, Pose.dips(elbow: 172))
-        XCTAssertEqual(a.successfulReps, 1, "171–180 must all count as 'extended'")
+        feed(a, Pose.dips(elbow: 166))
+        XCTAssertEqual(a.successfulReps, 1, "165–180 must all count as 'extended'")
     }
 
-    /// The spec's stated bottom: 90° or less, tolerated to 94.5°.
+    /// The spec's stated bottom: 90° or less, relaxed to 98°.
     func testBottomPhaseAcceptsTheToleratedDepth() {
         let cfg = ExerciseType.dips.repThresholds!
-        XCTAssertEqual(cfg.depthAngle, 94.5, accuracy: 0.0001)
+        XCTAssertEqual(cfg.depthAngle, 98, accuracy: 0.0001)
 
         let a = DipsAnalyzer()
         feed(a, Pose.dips(elbow: 175))
-        feed(a, Pose.dips(elbow: 93))    // deeper than 94.5 but shallower than 90
+        feed(a, Pose.dips(elbow: 97))    // deeper than 98 but shallower than 90 — inside the relaxed gate
         let events = feed(a, Pose.dips(elbow: 175))
-        XCTAssertEqual(a.successfulReps, 1, "the +5% tolerance must accept 93°")
+        XCTAssertEqual(a.successfulReps, 1, "the relaxed 98° gate must accept 97°")
         XCTAssertTrue(events.invalidFeedback.isEmpty)
     }
 

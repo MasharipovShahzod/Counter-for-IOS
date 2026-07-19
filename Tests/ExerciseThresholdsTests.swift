@@ -162,4 +162,28 @@ final class ExerciseThresholdsTests: XCTestCase {
         XCTAssertTrue(ExerciseType.pushUp.repThresholds!.supportAngleMin.isFinite,
                       "the exercise that USES this check must have a real bound")
     }
+
+    /// Spec §4: dips top relaxes from a locked 180° to 165°, and the bottom from
+    /// a punishing 90° to 98°. Both are stated as EFFECTIVE (post-tolerance)
+    /// bounds, so the nominal declarations are pre-divided by the tolerance.
+    func testDipsUseTheRelaxedSpecBounds() {
+        let t = ExerciseType.dips.repThresholds!
+        XCTAssertEqual(t.lockoutAngle, 165, accuracy: 0.5)
+        XCTAssertEqual(t.depthAngle, 98, accuracy: 0.5)
+    }
+
+    /// Spec §4: the pull-up dead hang relaxes from a strict 180° to 160°, so an
+    /// athlete who does not fully lock out at the bottom still re-arms.
+    func testPullUpHangUsesTheRelaxedSpecBound() {
+        let t = ExerciseType.pullUp.repThresholds!
+        XCTAssertEqual(t.lockoutAngle, 160, accuracy: 0.5)
+    }
+
+    /// The hysteresis band must survive the relaxation — a descent gate at or
+    /// above the lockout would credit and restart a rep on one jittering frame.
+    func testRelaxedDipsKeepTheirHysteresisBand() {
+        let t = ExerciseType.dips.repThresholds!
+        XCTAssertLessThanOrEqual(t.descentStartAngle,
+                                 t.lockoutAngle - ExerciseThresholds.minimumHysteresisBand)
+    }
 }

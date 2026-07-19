@@ -36,6 +36,22 @@ enum AnalyzerEvent {
     case stateChanged(RepState)
     case repCompleted(totalCount: Int)
     case invalidRep(feedback: String, severity: FormSeverity)
+    /// An advisory coaching cue, carried as a `VoiceCue` rather than a
+    /// pre-rendered string.
+    ///
+    /// WHY THIS ISN'T JUST AN `invalidRep`
+    /// -----------------------------------
+    /// `invalidRep` carries a `String`, and a string has already lost the
+    /// information the voice engine needs: whether to speak the full sentence,
+    /// shorten it to one word on a harsh legacy voice, or play a chime instead.
+    /// Emitting `VoiceCue.swing.defaultPhrase` fed the full sentence through the
+    /// String path, so the terse fallback and TONE mode — both required by the
+    /// spec — could never engage. Passing the cue itself keeps that choice open
+    /// until the moment of delivery.
+    ///
+    /// Always advisory: the manager renders it at `.warning` severity and it
+    /// never touches a rep count.
+    case coachingCue(VoiceCue)
     /// Normalized rep depth, 0 (top / lockout) → 1 (target depth reached).
     /// Emitted every analyzed frame to drive the live depth progress ring.
     case depthProgress(Double)
@@ -292,7 +308,10 @@ final class PushUpAnalyzer: ExerciseAnalyzer {
 
         // ---- Track depth ----
         t.minPrimaryAngle = min(t.minPrimaryAngle, elbow)
-        if elbow <= cfg.depthAngle {
+        // `isTrustworthyAngle` first: a degenerate frame yields 0, and
+        // `0 <= depthAngle` is true, so the sentinel meant to reject a broken
+        // frame would instead certify full depth. See PoseGeometry.
+        if PoseGeometry.isTrustworthyAngle(elbow), elbow <= cfg.depthAngle {
             t.reachedDepth = true
             t.transition(to: .atBottom, sink: &events)
         }
@@ -499,7 +518,9 @@ final class SquatAnalyzer: ExerciseAnalyzer {
 
 /// Parallel-bars dip tracker.
 /// Primary joint: elbow (shoulder–elbow–wrist).
-/// Top = arms extended (tolerated 171–180°); bottom = elbow at or under 94.5°.
+/// Top = arms extended (> 165°); bottom = elbow at or under 98°. Both were
+/// relaxed from a stricter 171°/94.5° per spec §4, so a dip that stops a little
+/// short of a full lockout still counts.
 ///
 /// Geometrically a dip and a push-up are the SAME elbow movement — bend, then
 /// straighten — so the only thing separating them is torso ORIENTATION: a dip's
@@ -511,6 +532,12 @@ final class DipsAnalyzer: ExerciseAnalyzer {
     private let cfg = ExerciseType.dips.repThresholds!   // .reps exercise: never nil
     /// Debounces the orientation alert to once per violation episode.
     private var orientationWarned = false
+
+    /// Horizontal shoulder drift, measured against a baseline frozen when the
+    /// descent begins. On the bars this catches the body swinging fore-and-aft
+    /// instead of travelling straight down. Advisory only — see `SwayMonitor`,
+    /// which cannot reach the counter.
+    private var sway = SwayMonitor(maxDriftFraction: 0.15)
 
     /// Shown when the torso is too flat to be a dip (i.e. it's a push-up).
     static let orientationMessage = "Keep your torso upright — that's a dip, not a push-up."
@@ -551,7 +578,16 @@ final class DipsAnalyzer: ExerciseAnalyzer {
             }
         }
 
-        // ---- Arm at the top: arms extended, 171–180° ----
+        // ---- Anti-sway ----
+        // Baseline accumulates while the athlete is supported at the top and
+        // freezes when the descent opens, so this measures travel away from
+        // where the rep actually started. Normalized against the upper arm.
+        // Nothing in this block touches the counter or the FSM state.
+        if sway.observe(joints.shoulder, scale: joints.upperArmLength) {
+            events.append(.coachingCue(.swing))
+        }
+
+        // ---- Arm at the top: arms extended, 165–180° ----
         if !t.attemptInProgress, elbow >= cfg.lockoutAngle {
             t.arm()
         }
@@ -560,6 +596,7 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         if !t.attemptInProgress {
             if t.isArmed, elbow < cfg.descentStartAngle {
                 t.beginAttempt()
+                sway.beginActivePhase()    // FREEZE the baseline here
                 t.transition(to: .descending, sink: &events)
             } else {
                 t.transition(to: .ready, sink: &events)
@@ -569,7 +606,10 @@ final class DipsAnalyzer: ExerciseAnalyzer {
 
         // ---- Track the dip depth ----
         t.minPrimaryAngle = min(t.minPrimaryAngle, elbow)
-        if elbow <= cfg.depthAngle {
+        // `isTrustworthyAngle` first: a degenerate frame yields 0, and
+        // `0 <= depthAngle` is true, so the sentinel meant to reject a broken
+        // frame would instead certify full depth. See PoseGeometry.
+        if PoseGeometry.isTrustworthyAngle(elbow), elbow <= cfg.depthAngle {
             t.reachedDepth = true
             t.transition(to: .atBottom, sink: &events)
         }
@@ -592,15 +632,30 @@ final class DipsAnalyzer: ExerciseAnalyzer {
                 t.creditRep(sink: &events)
             }
             t.endAttempt()
+            sway.endActivePhase()          // re-baseline at the top
             t.transition(to: .ready, sink: &events)
         }
 
         return events
     }
 
+    /// Drops the frozen sway baseline when the body leaves view.
+    ///
+    /// Without this, `DipsAnalyzer` used the protocol's default no-op and kept a
+    /// baseline frozen at wherever the athlete stood before the gap. Stepping
+    /// away and returning a few inches to one side then read as drift and
+    /// nagged "Keep your body steady" on a clean rep. The same applies to an
+    /// abandoned rep that never returns to lockout, so `endActivePhase()` never
+    /// runs — advisory only, but noise the athlete learns to tune out.
+    func trackingLost() -> [AnalyzerEvent] {
+        sway.reset()
+        return []
+    }
+
     func reset() {
         t.reset()
         orientationWarned = false
+        sway.reset()
     }
 }
 
@@ -641,6 +696,12 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
     private var reachedTop = false
     private var smoothedElbow: CGFloat?
     private let smoothingAlpha: CGFloat = 0.6
+
+    /// Horizontal pendulum sway, measured against a baseline frozen at the dead
+    /// hang. Advisory only — `SwayMonitor` has no access to the counter or the
+    /// FSM, so it cannot void a rep no matter what this analyzer does with the
+    /// result. Bound is 15% of the athlete's own calibrated arm span.
+    private var sway = SwayMonitor(maxDriftFraction: 0.15)
 
     /// Deepest elbow flexion seen during the attempt in progress, and the value
     /// captured from the last credited rep. Pull-up validity is decided by
@@ -697,6 +758,17 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
             events.append(.depthProgress(Double(max(0, min(1, progress)))))
         }
 
+        // ---- Anti-sway ----
+        // The baseline accumulates at the dead hang and freezes when the pull
+        // begins, so what this measures is how far the body has swung from where
+        // it started — not from where it currently is. Normalized against the
+        // calibrated arm span, so it holds at any camera distance.
+        let shoulderMid = CGPoint(x: (j.leftShoulder.x + j.rightShoulder.x) / 2,
+                                  y: j.meanShoulderY)
+        if sway.observe(shoulderMid, scale: armSpan) {
+            events.append(.coachingCue(.swing))
+        }
+
         // ---- Arm at the dead hang, and recalibrate the arm span there ----
         // Arm span is only truthful with the elbow straight; a bent arm measures
         // shorter. Refreshing at every hang keeps the trigger honest even if the
@@ -704,6 +776,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         if !attemptInProgress, isExtended {
             isArmed = true
             calibratedArmSpan = j.armSpan
+            sway.endActivePhase()          // re-baseline at the hang
             transition(to: .barLocked, sink: &events)
         }
 
@@ -713,6 +786,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
                 attemptInProgress = true
                 reachedTop = false
                 minElbowThisRep = .greatestFiniteMagnitude
+                sway.beginActivePhase()    // FREEZE the baseline here
                 transition(to: .ascending, sink: &events)   // pulling UP
             } else {
                 return events
@@ -792,6 +866,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         isArmed = false
         attemptInProgress = false
         reachedTop = false
+        sway.reset()
         transition(to: .ready, sink: &sink)
     }
 
@@ -818,6 +893,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         reachedTop = false
         minElbowThisRep = .greatestFiniteMagnitude
         isArmed = false
+        sway.reset()
         transition(to: barYLevel == nil ? .ready : .barLocked, sink: &events)
         return events
     }
@@ -847,6 +923,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         smoothedElbow = nil
         minElbowThisRep = .greatestFiniteMagnitude
         lastPeak = nil
+        sway.reset()
     }
 }
 

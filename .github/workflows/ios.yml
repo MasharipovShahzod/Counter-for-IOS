@@ -20,6 +20,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # THE XCODE VERSION IS RESOLVED, NOT LEFT IMPLICIT.
+      #
+      # `brew install xcodegen` below always installs the LATEST XcodeGen, which
+      # emits an Xcode-16-era project format (objectVersion 77). The macos-14
+      # image's DEFAULT Xcode is 15.4, which cannot read that format and fails
+      # with "future Xcode project file format (77)" — reported, unhelpfully, as
+      # exit 74 (EX_IOERR), the same "looks like a broken runner" disguise the
+      # destination bug wore below. Every run in this repo's history died here,
+      # before a single line was compiled.
+      #
+      # Resolved rather than hardcoded for exactly the reason the simulator
+      # destination is: a pinned version goes stale the moment the image changes,
+      # and asking the runner what it actually has cannot.
+      - name: Select the newest installed Xcode
+        run: |
+          set -eo pipefail
+          # Logged on every run: when this fails, the first question is always
+          # "what was available?" — so answer it up front.
+          ls -d /Applications/Xcode*.app
+          NEWEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $NEWEST"
+          sudo xcode-select -s "$NEWEST/Contents/Developer"
+          xcodebuild -version
+
       - name: Install XcodeGen
         run: |
           # The runner image preinstalls aws/tap, which Homebrew's tap-trust
