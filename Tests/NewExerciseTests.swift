@@ -36,17 +36,45 @@ final class DipsAnalyzerTests: XCTestCase {
         XCTAssertEqual(a.successfulReps, 1, "165–180 must all count as 'extended'")
     }
 
-    /// The spec's stated bottom: 90° or less, relaxed to 98°.
-    func testBottomPhaseAcceptsTheToleratedDepth() {
+    /// SOFT DEPTH. The spec's stated bottom is 105°, deliberately not a strict
+    /// 90°: the descent phase opens as soon as the elbow closes that far.
+    func testBottomPhaseAcceptsTheSoftDepth() {
         let cfg = ExerciseType.dips.repThresholds!
-        XCTAssertEqual(cfg.depthAngle, 98, accuracy: 0.0001)
+        XCTAssertEqual(cfg.depthAngle, 105, accuracy: 0.0001)
 
         let a = DipsAnalyzer()
         feed(a, Pose.dips(elbow: 175))
-        feed(a, Pose.dips(elbow: 97))    // deeper than 98 but shallower than 90 — inside the relaxed gate
+        feed(a, Pose.dips(elbow: 104))   // inside the soft gate, nowhere near 90°
         let events = feed(a, Pose.dips(elbow: 175))
-        XCTAssertEqual(a.successfulReps, 1, "the relaxed 98° gate must accept 97°")
+        XCTAssertEqual(a.successfulReps, 1, "the soft 105° gate must accept 104°")
         XCTAssertTrue(events.invalidFeedback.isEmpty)
+    }
+
+    /// The boundary itself: 105° exactly is a valid rep, 106° is not. Pins the
+    /// gate as `<=` rather than `<`.
+    func testSoftDepthBoundaryIsInclusive() {
+        let atGate = DipsAnalyzer()
+        feed(atGate, Pose.dips(elbow: 175))
+        feed(atGate, Pose.dips(elbow: 105))
+        feed(atGate, Pose.dips(elbow: 175))
+        XCTAssertEqual(atGate.successfulReps, 1, "105° exactly must count")
+
+        let justAbove = DipsAnalyzer()
+        feed(justAbove, Pose.dips(elbow: 175))
+        feed(justAbove, Pose.dips(elbow: 106))
+        feed(justAbove, Pose.dips(elbow: 175))
+        XCTAssertEqual(justAbove.successfulReps, 0, "106° must not count")
+    }
+
+    /// A dip that stops at 110° used to be credited under a hypothetical looser
+    /// gate and must not be: 105 is a relaxation, not an abolition.
+    func testDepthGateStillRejectsAShallowDip() {
+        let a = DipsAnalyzer()
+        feed(a, Pose.dips(elbow: 175))
+        feed(a, Pose.dips(elbow: 110))
+        let events = feed(a, Pose.dips(elbow: 175))
+        XCTAssertEqual(a.successfulReps, 0)
+        XCTAssertTrue(events.invalidFeedback.contains { $0.contains("Dip lower") })
     }
 
     func testShallowDipIsRejected() {

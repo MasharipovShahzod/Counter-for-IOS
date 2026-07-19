@@ -184,7 +184,7 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         // where the hip actually was. The cue is advisory: note that nothing in
         // this block touches `reps`, `reachedPeak`, or `currentState`.
         if sway.observe(hip, scale: thigh) {
-            events.append(.coachingCue(.swing))
+            events.append(.coachingCue(.swing, severity: .warning))
         }
 
         // ---- Lying: arm the machine and close any attempt in flight ----

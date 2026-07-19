@@ -121,7 +121,14 @@ public enum ExerciseType: String, CaseIterable {
             )
         case .dips:
             // Spec §4 relaxation: top = elbow > 165° effective (was a locked
-            // 171°), bottom = elbow <= 98° effective (was a punishing 94.5°).
+            // 171°), bottom = elbow <= 105° effective.
+            //
+            // SOFT DEPTH. 105° is deliberately NOT the textbook 90°. A dip driven
+            // to a true right angle at the elbow is a deep-shoulder position most
+            // athletes cannot reach without the humerus dropping below parallel,
+            // and gating on it made the tracker score zero for people dipping
+            // perfectly well. The bottom was 98° before this pass; the spec
+            // relaxes it further to 105° so a controlled, honest dip counts.
             //
             // The nominals are written as the DIVISION that inverts `Tolerance`,
             // not as a hand-rounded decimal, so the effective values land on the
@@ -130,7 +137,7 @@ public enum ExerciseType: String, CaseIterable {
             // fails an exact assertion — and did, on CI.
             return ExerciseThresholds(
                 nominalDescentStart: 150,
-                nominalDepth:        98 / 1.05,    // → 98.0 effective
+                nominalDepth:        105 / 1.05,   // → 105.0 effective
                 nominalLockout:      165 / 0.95,   // → 165.0 effective
                 reversalMargin:      12,
                 // Torso must be clearly vertical/diagonal, not flat — this is the
@@ -337,6 +344,45 @@ struct PullUpConfig {
     /// stay put while the shoulders travel.
     let barDriftArmFraction: CGFloat
 
+    /// THE SECOND PEAK TRIGGER. The top of a rep ALSO fires when the mean elbow
+    /// angle closes to at or below this, independently of shoulder travel.
+    ///
+    /// WHY THE TRIGGER IS DISJUNCTIVE
+    /// ------------------------------
+    /// Shoulder travel and elbow closure fail on opposite body types. A
+    /// long-armed athlete finishes a legitimate chin-over-bar rep with the
+    /// shoulders still far from the bar, so the travel gate alone under-counts
+    /// them; a short-armed athlete on a high bar can satisfy the travel gate
+    /// with the arms barely bent. Requiring BOTH would score the intersection —
+    /// which is nobody. `OR` scores the union, which is the movement.
+    ///
+    /// Used as an EFFECTIVE value, not routed through `Tolerance`: 80° is the
+    /// number the spec states, and it is already the relaxed one (a full
+    /// contraction sits nearer 60°).
+    ///
+    /// MUST be read behind `PoseGeometry.isTrustworthyAngle`. This is a `<=`
+    /// gate, and `angle` returns the 0 sentinel for a degenerate frame — so
+    /// `0 <= 80` is TRUE and one broken frame would certify a peak that never
+    /// happened. See `PoseGeometry.angle`.
+    let peakElbowAngle: CGFloat
+
+    /// ANTI-JUMP. Maximum vertical wrist drift from the locked bar line, as a
+    /// fraction of the athlete's own hang length (arm span), tolerated DURING a
+    /// rep. Exceeding it voids the rep in progress.
+    ///
+    /// Hands on a real bar do not move; the shoulders travel and the wrists stay.
+    /// An athlete who jumps, or who kicks off a support, moves the whole body —
+    /// wrists included — so the wrist line breaks away from the bar it locked to.
+    ///
+    /// Body-normalized, NOT a fraction of screen height: a raw screen percentage
+    /// means a different physical distance at every camera framing, so it would
+    /// be simultaneously too strict up close and too lax far away.
+    ///
+    /// Distinct from, and tighter than, `barDriftArmFraction`: this one voids a
+    /// single rep, while that one concludes the athlete is not on the bar at all
+    /// and drops the lock entirely.
+    let jumpDriftArmFraction: CGFloat
+
     static let standard = PullUpConfig(
         barZoneMinY:          0.65,                  // upper 35% of frame
         barLockDuration:      1.0,                   // per spec
@@ -347,7 +393,69 @@ struct PullUpConfig {
         // strong rep reaches and would count zero reps forever. See
         // `BilateralJointsTests.testTopOfARealPullUpDoesNotReachTheBarLine`.
         topTriggerArmFraction: Tolerance.atMost(0.50), // → 0.525
-        barDriftArmFraction:  0.25
+        barDriftArmFraction:  0.25,
+        peakElbowAngle:       80,                      // effective; see above
+        jumpDriftArmFraction: 0.15                     // 15% of hang length
+    )
+}
+
+// MARK: - Dips configuration
+
+/// The dip's anti-cheat parameters, which are spatial rather than angular and so
+/// have no home in `ExerciseThresholds`.
+///
+/// THE CHEAT THIS CLOSES
+/// ---------------------
+/// On low parallel bars — or a pair of chairs, which is how this is usually
+/// filmed at home — the athlete can leave their feet on the floor and simply
+/// bend the knees. The elbow sweeps its full range, the torso stays upright, and
+/// every angular gate in the tracker passes: the legs are taking the load and
+/// nothing about the arms can tell. What separates it from a real dip is that in
+/// a real dip the WHOLE BODY descends, so the ankles fall with the shoulders,
+/// whereas a planted foot stays pinned while the shoulders drop.
+struct DipsConfig {
+
+    /// Minimum ankle-travel to shoulder-travel ratio over the rep window. Below
+    /// this the feet were supporting the body and the rep does not count.
+    ///
+    /// A genuine dip carries the ankles down with the shoulders, giving a ratio
+    /// near 1. A planted foot gives a ratio near 0. 0.35 sits well clear of both,
+    /// leaving room for the legs to swing a little — which they always do.
+    ///
+    /// DIMENSIONLESS BY CONSTRUCTION, which is what makes it robust. It is a
+    /// ratio of two distances measured along the same axis in the same frame, so
+    /// camera distance cancels, body size cancels, and a tilted phone scales both
+    /// travels by the same cosine and cancels too.
+    let footPlantTravelRatio: CGFloat
+
+    /// Fraction of the rep's frames that must carry a trustworthy ankle before
+    /// the ratio is believed at all.
+    ///
+    /// FAIL-OPEN, DELIBERATELY. Ankles leave frame constantly on dips — the
+    /// camera is framed on the torso, the legs are often tucked or crossed, and
+    /// `BodyJoints.make` does not even require a confident ankle for this
+    /// exercise. An unseen ankle produces zero measured travel, which is exactly
+    /// what a planted foot produces, so a naive check would read "out of frame"
+    /// as "cheating" and punish honest reps. Below this coverage the check is
+    /// SKIPPED, not failed.
+    let minAnkleCoverage: CGFloat
+
+    /// Per-frame confidence floor for an ankle to count toward coverage.
+    let minAnkleConfidence: Float
+
+    /// The shoulders must travel at least this far — as a fraction of the
+    /// athlete's own upper arm — before the ratio means anything.
+    ///
+    /// The ratio's denominator is shoulder travel, so a rep where the shoulders
+    /// barely moved makes it explode or collapse on noise alone. Rather than
+    /// divide by something near zero, the check stands down.
+    let minShoulderTravelArmFraction: CGFloat
+
+    static let standard = DipsConfig(
+        footPlantTravelRatio:         0.35,
+        minAnkleCoverage:             0.80,
+        minAnkleConfidence:           0.3,
+        minShoulderTravelArmFraction: 0.25
     )
 }
 
@@ -473,6 +581,127 @@ public enum RepState: String {
     /// Global body orientation/alignment is invalid (piked hips, standing, or
     /// spinal sag). The counter is hard-locked until posture is corrected.
     case invalidPosition
+}
+
+// MARK: - Derived rep phase
+
+/// The coarse, exercise-independent phase of a repetition.
+///
+/// WHY THIS IS DERIVED RATHER THAN STORED
+/// --------------------------------------
+/// `RepState` is the state machines' own vocabulary and it is deliberately
+/// literal: `.atBottom` means "the primary joint reached its minimum angle", and
+/// `.ascending` means "that angle is climbing again". Those names describe the
+/// MEASUREMENT, not the movement, and for half the catalogue the two point in
+/// opposite directions — the bottom of a pull-up's elbow angle is the TOP of the
+/// athlete's travel.
+///
+/// Consumers that want to reason about the movement ("is the athlete in the hard
+/// part of the rep?") need the movement's frame of reference, not the sensor's.
+/// This enum supplies it, and `derive` owns the per-exercise inversion so that no
+/// caller has to remember which exercises are upside down.
+///
+/// `RepState` stays exactly as it was: it remains the FSM's truth and the UI
+/// continues to render its finer distinctions (`.barLocked`, `.holding`,
+/// `.invalidPosition`), which this coarser enum intentionally collapses.
+public enum RepPhase: String {
+    /// At rest in the start position, or not yet tracking.
+    case start
+    /// Travelling toward the extended/unloaded end of the movement.
+    case downPhase
+    /// Travelling toward the contracted/loaded end of the movement.
+    case upPhase
+    /// A rep was credited on this frame.
+    case completed
+    /// A form or anti-cheat fault is active; nothing will be credited.
+    case cheatsDetected
+
+    /// Projects an FSM state onto the movement's own frame of reference.
+    ///
+    /// - Parameters:
+    ///   - state: the analyzer's current `RepState`.
+    ///   - exercise: selects the inversion mapping.
+    ///   - justCompletedRep: `true` on the frame that emitted `.repCompleted`.
+    ///     Required because `RepState` has no terminal case — a credited rep
+    ///     returns the machine to `.ready`, so completion is an EVENT and cannot
+    ///     be recovered from the state alone.
+    public static func derive(from state: RepState,
+                              exercise: ExerciseType,
+                              justCompletedRep: Bool = false) -> RepPhase {
+        if justCompletedRep { return .completed }
+        // Faults outrank travel: an athlete can be mid-ascent and cheating, and
+        // the fault is the thing worth reporting.
+        switch state {
+        case .invalidRepDetected, .invalidPosition:
+            return .cheatsDetected
+        case .ready, .descending, .atBottom, .ascending, .barLocked, .holding:
+            break
+        }
+
+        switch exercise {
+        case .pushUp, .squat, .dips: return descendFirst(state)
+        case .pullUp:                return ascendFirst(state)
+        case .crunches:              return sitUp(state)
+        case .plank:                 return .start
+        }
+    }
+
+    /// Movements that START EXTENDED AT THE TOP and descend into the contraction:
+    /// push-ups, squats, dips. Here the FSM's vocabulary and the athlete's agree,
+    /// so the mapping is the identity one.
+    ///
+    /// This is the arm of the mapping that satisfies "the Dip contracted bottom
+    /// state maps to DOWN_PHASE".
+    private static func descendFirst(_ state: RepState) -> RepPhase {
+        switch state {
+        case .ready:                              return .start
+        case .descending:                         return .downPhase
+        case .atBottom:                           return .downPhase  // contracted = bottom
+        case .ascending:                          return .upPhase
+        case .barLocked, .holding:                return .start      // not reachable here
+        case .invalidRepDetected, .invalidPosition: return .cheatsDetected
+        }
+    }
+
+    /// Movements that START EXTENDED AT THE BOTTOM and ascend into the
+    /// contraction: pull-ups. The FSM is inverted against the athlete here —
+    /// `PullUpAnalyzer` reuses `.atBottom` to mean the APEX of the pull, because
+    /// that is where the elbow angle bottoms out.
+    ///
+    /// This is the arm that satisfies "the Pull-up contracted top state maps to
+    /// UP_PHASE".
+    private static func ascendFirst(_ state: RepState) -> RepPhase {
+        switch state {
+        case .ready, .barLocked:                  return .start
+        case .ascending:                          return .upPhase
+        case .atBottom:                           return .upPhase    // apex: contracted = top
+        case .descending:                         return .downPhase
+        case .holding:                            return .start      // not reachable here
+        case .invalidRepDetected, .invalidPosition: return .cheatsDetected
+        }
+    }
+
+    /// THE SIT-UP / CRUNCH OVERRIDE.
+    ///
+    /// Sit-ups break the pattern both other mappings share. In every other
+    /// exercise the extended position is a neutral START — standing tall, or
+    /// hanging at the dead hang. For a sit-up the extended position is lying flat
+    /// on the floor, and that IS the bottom of the movement, not a resting point
+    /// outside it. So `.ready` maps to `.downPhase` here where it maps to
+    /// `.start` everywhere else; that single line is the whole override.
+    ///
+    /// `CrunchAnalyzer` is this project's sit-up: it reuses `.atBottom` for the
+    /// apex of the contraction exactly as `PullUpAnalyzer` does.
+    private static func sitUp(_ state: RepState) -> RepPhase {
+        switch state {
+        case .ready:                              return .downPhase  // lying flat IS the bottom
+        case .descending:                         return .downPhase
+        case .ascending:                          return .upPhase
+        case .atBottom:                           return .upPhase    // apex of the curl
+        case .barLocked, .holding:                return .downPhase  // not reachable here
+        case .invalidRepDetected, .invalidPosition: return .cheatsDetected
+        }
+    }
 }
 
 // MARK: - Form feedback severity

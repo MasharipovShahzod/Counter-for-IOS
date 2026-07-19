@@ -335,9 +335,57 @@ struct BodyJoints {
     /// Lowest confidence among the joints that were actually required.
     let minConfidence: Float
 
+    /// Confidence of the ANKLE specifically, reported separately because for
+    /// several exercises the ankle is not a mandatory joint and therefore does
+    /// not participate in `minConfidence` at all.
+    ///
+    /// WHY THIS IS NOT REDUNDANT WITH `minConfidence`
+    /// ----------------------------------------------
+    /// `make` only gates and finite-checks the joints an exercise declares
+    /// mandatory. Dips do not declare the ankle — legs are routinely tucked or
+    /// crossed on the bars — so `ankle` can arrive both low-confidence AND
+    /// non-finite while `minConfidence` reports a perfectly healthy frame. The
+    /// dip's foot-plant check reads the ankle, so it needs to know how much that
+    /// reading is worth; without this field it would silently treat NaN or a
+    /// hallucinated ankle as a measurement.
+    ///
+    /// Defaults to 0 — "no ankle evidence" — so any construction site that does
+    /// not supply it leaves ankle-dependent checks standing down rather than
+    /// running on an unvouched joint.
+    let ankleConfidence: Float
+
     /// Which physical side these joints came from (useful for overlays/UX).
     let side: Side
     enum Side { case left, right }
+
+    /// Explicit rather than memberwise so `ankleConfidence` can carry a default.
+    /// Parameter order matches the former memberwise initialiser, so existing
+    /// call sites are unaffected.
+    init(shoulder: CGPoint,
+         elbow: CGPoint,
+         wrist: CGPoint,
+         hip: CGPoint,
+         knee: CGPoint,
+         ankle: CGPoint,
+         minConfidence: Float,
+         ankleConfidence: Float = 0,
+         side: Side) {
+        self.shoulder = shoulder
+        self.elbow = elbow
+        self.wrist = wrist
+        self.hip = hip
+        self.knee = knee
+        self.ankle = ankle
+        self.minConfidence = minConfidence
+        self.ankleConfidence = ankleConfidence
+        self.side = side
+    }
+
+    /// True when the ankle is worth measuring: finite AND confident enough.
+    /// Both halves matter — see `ankleConfidence`.
+    func hasTrustworthyAnkle(minConfidence floor: Float) -> Bool {
+        PoseGeometry.isFinite(ankle) && ankleConfidence >= floor
+    }
 }
 
 /// Invariant joint-name lists, allocated once for the process rather than twice
@@ -447,6 +495,10 @@ extension BodyJoints {
                 knee:     recognized[4].location,
                 ankle:    recognized[5].location,
                 minConfidence: weakest,
+                // Reported straight from the observation, NOT folded into
+                // `weakest`: for dips the ankle is optional, so folding it in
+                // would reject frames over a joint the exercise never needed.
+                ankleConfidence: recognized[5].confidence,
                 side: s
             )
         }

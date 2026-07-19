@@ -92,6 +92,59 @@ enum DeviceCompatibility {
         #endif
     }
 
+    // MARK: - Performance tier
+
+    /// How much capture resolution a device can afford to carry.
+    ///
+    /// Separate from `SafetyCheckResult`, which answers "can this device run
+    /// pose estimation at all". This answers the narrower question of how much
+    /// headroom is left once it is running — an A12 iPhone XS clears the
+    /// compatibility bar and still cannot spare the memory bandwidth an A17 has.
+    enum PerformanceTier {
+        /// A14 and newer. Comfortable margin for a 1080p preview.
+        case high
+        /// A12/A13 — supported, but with no thermal headroom to waste.
+        case low
+    }
+
+    /// Classifies the current device.
+    ///
+    /// The split is drawn at the A14 (iPhone 12 / iPhone13,x), the generation
+    /// where the ISP and memory bandwidth stopped being the binding constraint
+    /// for a 1080p preview composited alongside a live Vision request.
+    ///
+    /// Unknown identifiers resolve to `.high`, consistent with
+    /// `hasNeuralEngineClassChip`: an id this build does not recognise is
+    /// overwhelmingly likely to be hardware NEWER than it, and assuming
+    /// otherwise would permanently cap every future device at 720p.
+    static var performanceTier: PerformanceTier {
+        // The Simulator runs on the host Mac's silicon and is not thermally
+        // constrained in any way this tier is meant to model.
+        #if targetEnvironment(simulator)
+        return .high
+        #else
+        return tier(for: modelIdentifier)
+        #endif
+    }
+
+    /// Pure classifier, `internal` so tests can drive it with a fixed identifier
+    /// instead of whatever hardware the CI runner happens to be.
+    static func tier(for identifier: String) -> PerformanceTier {
+        guard let (family, major) = parse(identifier) else { return .high }
+        switch family {
+        case "iPhone":
+            // iPhone13,x == iPhone 12 (A14). iPhone12,x == 11 / SE2 (A13),
+            // iPhone11,x == XS / XR (A12) — both supported but low-tier.
+            return major >= 13 ? .high : .low
+        case "iPad":
+            // iPad13,x == Air 4 (A14) / M1 Pro. Earlier supported iPads
+            // (iPad8,x A12X, iPad11,x A12) are low-tier.
+            return major >= 13 ? .high : .low
+        default:
+            return .high
+        }
+    }
+
     /// Splits "iPhone14,2" into ("iPhone", 14). Returns nil for non-device ids.
     private static func parse(_ identifier: String) -> (family: String, major: Int)? {
         // Find where the family name ends and the major number begins.

@@ -81,7 +81,10 @@ final class WorkoutViewController: UIViewController {
 
     private func startSession() {
         session.beginConfiguration()
-        session.sessionPreset = .high
+
+        // Tiered preview/analysis split — see `CaptureConfiguration`.
+        let tier = DeviceCompatibility.performanceTier
+        CaptureConfiguration.applyPreviewPreset(to: session, tier: tier)
 
         let position: AVCaptureDevice.Position = usingFrontCamera ? .front : .back
         guard
@@ -96,7 +99,10 @@ final class WorkoutViewController: UIViewController {
 
         videoOutput.alwaysDiscardsLateVideoFrames = true   // always work on the freshest frame
         videoOutput.setSampleBufferDelegate(self, queue: sampleQueue)
-        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+            CaptureConfiguration.applyAnalysisResolution(to: videoOutput, tier: tier)
+        }
 
         session.commitConfiguration()
         session.startRunning()

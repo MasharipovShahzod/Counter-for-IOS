@@ -99,6 +99,41 @@ enum Pose {
                           minConfidence: 0.9, side: .right)
     }
 
+    /// A dip in which the WHOLE BODY can be placed, not just the arm.
+    ///
+    /// `dips(elbow:)` pins the shoulder and the ankle, so both travel zero
+    /// distance across a rep — which is exactly the degenerate case the
+    /// foot-plant check refuses to judge. This variant exposes the shoulder line
+    /// and the ankle independently so a descent can actually be modelled: move
+    /// them together for an honest rep, pin the ankle for a foot-plant cheat.
+    ///
+    /// The arm geometry is identical to `dips(elbow:)` and the defaults reproduce
+    /// it exactly, so this is a superset rather than a second, diverging fixture.
+    ///
+    /// `ankleConfidence` defaults to 0 — no ankle evidence — matching
+    /// `BodyJoints`'s own default, so a caller that does not opt in leaves the
+    /// foot-plant check standing down.
+    static func dipsBody(elbow elbowDegrees: CGFloat,
+                         shoulderY: CGFloat = 0.55,
+                         ankleY: CGFloat = 0.02,
+                         ankleConfidence: Float = 0) -> BodyJoints {
+        let shoulder = CGPoint(x: 0.5, y: shoulderY)
+        let elbow    = CGPoint(x: 0.5, y: shoulderY - 0.13)
+        let r: CGFloat = 0.13
+        let t = elbowDegrees * .pi / 180
+        let wrist = CGPoint(x: elbow.x + r * sin(t), y: elbow.y + r * cos(t))
+
+        return BodyJoints(shoulder: shoulder, elbow: elbow, wrist: wrist,
+                          // Straight down from the shoulder → torso vertical, so
+                          // the orientation gate passes at any `shoulderY`.
+                          hip:   CGPoint(x: 0.5, y: shoulderY - 0.40),
+                          knee:  CGPoint(x: 0.5, y: shoulderY - 0.47),
+                          ankle: CGPoint(x: 0.5, y: ankleY),
+                          minConfidence: 0.9,
+                          ankleConfidence: ankleConfidence,
+                          side: .right)
+    }
+
     /// A "dip" attempted with a FLAT (push-up) torso — the cheat the orientation
     /// gate must reject. Same arm bend, horizontal torso.
     static func dipsWithFlatTorso(elbow elbowDegrees: CGFloat) -> BodyJoints {
@@ -316,6 +351,53 @@ enum Pose {
         )
     }
 
+    /// A frame whose elbow angle is DEGENERATE: both elbows sit exactly on their
+    /// shoulders, so `PoseGeometry.angle` returns its 0 sentinel for each side
+    /// and `meanElbowAngle` is 0.
+    ///
+    /// Every coordinate is finite, so this passes every upstream guard and
+    /// reaches the analyzer intact — which is the whole danger. The peak gate is
+    /// `elbow <= 80`, and `0 <= 80` is true, so without an explicit trust check a
+    /// frame like this certifies the deepest possible contraction.
+    ///
+    /// The shoulders are left at a dead hang, far from the bar, so the shoulder
+    /// disjunct cannot fire either: any peak this produces came from the sentinel.
+    static func degenerateElbows(wristY: CGFloat = 0.9) -> BilateralJoints {
+        let shoulderY = wristY - 0.4
+        return BilateralJoints(
+            leftShoulder:  CGPoint(x: 0.40, y: shoulderY),
+            rightShoulder: CGPoint(x: 0.60, y: shoulderY),
+            leftElbow:     CGPoint(x: 0.40, y: shoulderY),   // coincident → angle 0
+            rightElbow:    CGPoint(x: 0.60, y: shoulderY),
+            leftWrist:     CGPoint(x: 0.40, y: wristY),
+            rightWrist:    CGPoint(x: 0.60, y: wristY),
+            minConfidence: 0.9
+        )
+    }
+
+    /// A pull whose shoulders stay far from the bar (0.6 of an arm below, well
+    /// outside the 0.525 trigger) but whose ELBOWS close past the 80° gate.
+    /// Isolates the elbow disjunct of the peak trigger.
+    static func pulledByElbowsOnly(elbowDegrees: CGFloat = 75) -> BilateralJoints {
+        pullUp(shoulderY: 0.9 - 0.6 * 0.4, elbowDegrees: elbowDegrees)   // shoulderY = 0.66
+    }
+
+    /// The whole body raised or lowered vertically, wrists included — a jump, or
+    /// pushing off a support. Preserves every joint ANGLE, so the only thing that
+    /// changes is the wrist line's distance from the locked bar.
+    static func liftedVertically(_ j: BilateralJoints, byY dy: CGFloat) -> BilateralJoints {
+        func mv(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x, y: p.y + dy) }
+        return BilateralJoints(
+            leftShoulder:  mv(j.leftShoulder),
+            rightShoulder: mv(j.rightShoulder),
+            leftElbow:     mv(j.leftElbow),
+            rightElbow:    mv(j.rightElbow),
+            leftWrist:     mv(j.leftWrist),
+            rightWrist:    mv(j.rightWrist),
+            minConfidence: j.minConfidence
+        )
+    }
+
     /// A half-hearted pull: shoulders only 0.6 of an arm below the bar, which
     /// does NOT clear the 0.525 trigger. The margin is narrower now (0.6 vs
     /// 0.525) than it was against the old 0.42 bound.
@@ -338,6 +420,14 @@ extension Array where Element == AnalyzerEvent {
     }
     var states: [RepState] {
         compactMap { if case .stateChanged(let s) = $0 { return s } else { return nil } }
+    }
+    var coachingCues: [VoiceCue] {
+        compactMap { if case .coachingCue(let c, _) = $0 { return c } else { return nil } }
+    }
+    /// Severities carried by coaching cues specifically — distinct from
+    /// `severities`, which reads `invalidRep`.
+    var cueSeverities: [FormSeverity] {
+        compactMap { if case .coachingCue(_, let s) = $0 { return s } else { return nil } }
     }
     var depths: [Double] {
         compactMap { if case .depthProgress(let d) = $0 { return d } else { return nil } }

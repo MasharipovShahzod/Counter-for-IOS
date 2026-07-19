@@ -49,9 +49,14 @@ enum AnalyzerEvent {
     /// spec — could never engage. Passing the cue itself keeps that choice open
     /// until the moment of delivery.
     ///
-    /// Always advisory: the manager renders it at `.warning` severity and it
-    /// never touches a rep count.
-    case coachingCue(VoiceCue)
+    /// THE SEVERITY IS CARRIED, NOT ASSUMED. This case used to be advisory by
+    /// construction — the manager hard-coded `.warning` — which was true of every
+    /// cue that existed at the time. `.grounded` broke that: a dip performed with
+    /// the feet on the floor is a rep-voiding anti-cheat fault that still wants
+    /// the `VoiceCue` delivery path, because that path is what honours the terse
+    /// fallback and TONE mode. Encoding severity here keeps both properties
+    /// instead of forcing a choice between them.
+    case coachingCue(VoiceCue, severity: FormSeverity)
     /// Normalized rep depth, 0 (top / lockout) → 1 (target depth reached).
     /// Emitted every analyzed frame to drive the live depth progress ring.
     case depthProgress(Double)
@@ -514,13 +519,116 @@ final class SquatAnalyzer: ExerciseAnalyzer {
     }
 }
 
+// MARK: - Dip foot-plant detection
+
+/// Accumulates how far the shoulders and the ankles each travelled vertically
+/// over one rep, and decides afterwards whether the feet were carrying the body.
+///
+/// THE MEASUREMENT
+/// ---------------
+/// Travel is the peak-to-peak range of each joint's Y over the rep window, and
+/// the verdict is their RATIO. In an honest dip the whole body descends together,
+/// so the ankles fall about as far as the shoulders and the ratio lands near 1.
+/// With a foot planted on the floor the ankle is pinned while the shoulders drop,
+/// driving the ratio toward 0.
+///
+/// WHY A RATIO AND NOT TWO ABSOLUTE DISTANCES
+/// ------------------------------------------
+/// A ratio of two distances measured along the same axis in the same frame is
+/// dimensionless: camera distance cancels, body size cancels, and — usefully —
+/// so does phone tilt, because a rotation scales both travels by the same cosine.
+/// That is what lets one constant hold across every framing without a
+/// gravity vector.
+struct FootPlantTracker {
+
+    private var shoulderMinY: CGFloat = .greatestFiniteMagnitude
+    private var shoulderMaxY: CGFloat = -.greatestFiniteMagnitude
+    private var ankleMinY: CGFloat = .greatestFiniteMagnitude
+    private var ankleMaxY: CGFloat = -.greatestFiniteMagnitude
+
+    private var frames = 0
+    private var framesWithAnkle = 0
+
+    /// What the accumulated window supports.
+    enum Verdict: Equatable {
+        /// Ankles fell with the shoulders — a real dip.
+        case honest
+        /// Shoulders descended while the ankles stayed pinned.
+        case footPlanted
+        /// Not enough trustworthy evidence to judge. FAIL-OPEN: the caller must
+        /// credit the rep, not reject it.
+        case insufficientEvidence
+    }
+
+    mutating func begin() {
+        self = FootPlantTracker()
+    }
+
+    /// Feeds one frame of the rep window.
+    mutating func observe(shoulder: CGPoint, ankle: CGPoint, ankleIsTrustworthy: Bool) {
+        guard PoseGeometry.isFinite(shoulder) else { return }
+        frames += 1
+        shoulderMinY = min(shoulderMinY, shoulder.y)
+        shoulderMaxY = max(shoulderMaxY, shoulder.y)
+
+        guard ankleIsTrustworthy else { return }
+        framesWithAnkle += 1
+        ankleMinY = min(ankleMinY, ankle.y)
+        ankleMaxY = max(ankleMaxY, ankle.y)
+    }
+
+    /// Judges the accumulated window.
+    ///
+    /// - Parameters:
+    ///   - cfg: the ratio, coverage and travel floors.
+    ///   - upperArm: the athlete's shoulder→elbow length, used to decide whether
+    ///     the shoulders moved far enough for the ratio to mean anything.
+    func verdict(cfg: DipsConfig, upperArm: CGFloat) -> Verdict {
+        guard frames > 0 else { return .insufficientEvidence }
+
+        // FAIL-OPEN GATE 1: was the ankle actually visible for most of the rep?
+        // An unseen ankle contributes zero travel, which is indistinguishable
+        // from a planted one — so without this, framing that crops the legs (the
+        // norm on dips) would read as cheating on every honest rep.
+        let coverage = CGFloat(framesWithAnkle) / CGFloat(frames)
+        guard coverage >= cfg.minAnkleCoverage else { return .insufficientEvidence }
+
+        let shoulderTravel = shoulderMaxY - shoulderMinY
+
+        // FAIL-OPEN GATE 2: the ratio's denominator. A rep where the shoulders
+        // barely moved makes the ratio explode or collapse on noise alone, so
+        // the check stands down rather than dividing by something near zero.
+        guard upperArm > 0, upperArm.isFinite,
+              shoulderTravel > cfg.minShoulderTravelArmFraction * upperArm else {
+            return .insufficientEvidence
+        }
+
+        let ankleTravel = ankleMaxY - ankleMinY
+        guard ankleTravel.isFinite else { return .insufficientEvidence }
+
+        return (ankleTravel / shoulderTravel) < cfg.footPlantTravelRatio
+            ? .footPlanted
+            : .honest
+    }
+}
+
 // MARK: - Parallel bars dips
 
-/// Parallel-bars dip tracker.
+/// Parallel-bars dip tracker. SIDE VIEW.
 /// Primary joint: elbow (shoulder–elbow–wrist).
-/// Top = arms extended (> 165°); bottom = elbow at or under 98°. Both were
-/// relaxed from a stricter 171°/94.5° per spec §4, so a dip that stops a little
-/// short of a full lockout still counts.
+/// Top = arms extended (> 165°); bottom = elbow at or under 105° — the "soft
+/// depth" the spec asks for, deliberately not a strict 90°.
+///
+/// NO EQUIPMENT IS EVER SEARCHED FOR. The bars are not detected, segmented or
+/// tracked; the WRIST is the virtual bar, because a hand supporting body weight
+/// on a bar is the one landmark guaranteed to hold still for the whole set.
+/// Everything else is measured relative to it.
+///
+/// ANTI-CHEAT, in the order it fires:
+///   1. torso orientation — separates a dip from a push-up;
+///   2. depth — the elbow must actually close to 105°;
+///   3. foot support — the ankles must fall with the shoulders, or the legs were
+///      taking the load. See `FootPlantTracker`.
 ///
 /// Geometrically a dip and a push-up are the SAME elbow movement — bend, then
 /// straighten — so the only thing separating them is torso ORIENTATION: a dip's
@@ -538,6 +646,12 @@ final class DipsAnalyzer: ExerciseAnalyzer {
     /// instead of travelling straight down. Advisory only — see `SwayMonitor`,
     /// which cannot reach the counter.
     private var sway = SwayMonitor(maxDriftFraction: 0.15)
+
+    private let foot = DipsConfig.standard
+
+    /// Vertical travel bookkeeping for the foot-plant check, accumulated over the
+    /// rep window and evaluated once at lockout. See `FootPlantTracker`.
+    private var footPlant = FootPlantTracker()
 
     /// Shown when the torso is too flat to be a dip (i.e. it's a push-up).
     static let orientationMessage = "Keep your torso upright — that's a dip, not a push-up."
@@ -584,7 +698,7 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         // where the rep actually started. Normalized against the upper arm.
         // Nothing in this block touches the counter or the FSM state.
         if sway.observe(joints.shoulder, scale: joints.upperArmLength) {
-            events.append(.coachingCue(.swing))
+            events.append(.coachingCue(.swing, severity: .warning))
         }
 
         // ---- Arm at the top: arms extended, 165–180° ----
@@ -597,12 +711,19 @@ final class DipsAnalyzer: ExerciseAnalyzer {
             if t.isArmed, elbow < cfg.descentStartAngle {
                 t.beginAttempt()
                 sway.beginActivePhase()    // FREEZE the baseline here
+                footPlant.begin()          // open a fresh travel window
                 t.transition(to: .descending, sink: &events)
             } else {
                 t.transition(to: .ready, sink: &events)
                 return events
             }
         }
+
+        // ---- Accumulate the foot-plant evidence for this rep ----
+        footPlant.observe(shoulder: joints.shoulder,
+                          ankle: joints.ankle,
+                          ankleIsTrustworthy: joints.hasTrustworthyAnkle(
+                              minConfidence: foot.minAnkleConfidence))
 
         // ---- Track the dip depth ----
         t.minPrimaryAngle = min(t.minPrimaryAngle, elbow)
@@ -620,7 +741,11 @@ final class DipsAnalyzer: ExerciseAnalyzer {
             if !t.reachedDepth, !t.errorEmitted {
                 t.errorEmitted = true
                 t.transition(to: .invalidRepDetected, sink: &events)
-                events.append(.invalidRep(feedback: "Dip lower! Bend to 90°.", severity: .warning))
+                // Names the movement, not a number: the gate is 105°, and
+                // telling an athlete to "bend to 90°" asked for a depth the
+                // tracker does not require and most people cannot reach.
+                events.append(.invalidRep(feedback: "Dip lower! Bend your elbows further.",
+                                          severity: .warning))
             } else if !t.errorEmitted {
                 t.transition(to: .ascending, sink: &events)
             }
@@ -629,7 +754,23 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         // ---- Top → Bottom → Top completes one rep ----
         if elbow >= cfg.lockoutAngle {
             if t.reachedDepth, !t.errorEmitted {
-                t.creditRep(sink: &events)
+                // ============================================================
+                // FOOT-SUPPORT GATE. The last thing standing between a
+                // depth-valid, orientation-valid rep and the counter.
+                //
+                // `.insufficientEvidence` CREDITS THE REP. That is the whole
+                // point of the fail-open design: legs are cropped or occluded on
+                // most dip framings, and an unseen ankle looks exactly like a
+                // planted one, so silence here must mean "not proven" rather
+                // than "guilty".
+                // ============================================================
+                switch footPlant.verdict(cfg: foot, upperArm: joints.upperArmLength) {
+                case .footPlanted:
+                    t.transition(to: .invalidRepDetected, sink: &events)
+                    events.append(.coachingCue(.grounded, severity: .critical))
+                case .honest, .insufficientEvidence:
+                    t.creditRep(sink: &events)
+                }
             }
             t.endAttempt()
             sway.endActivePhase()          // re-baseline at the top
@@ -649,6 +790,10 @@ final class DipsAnalyzer: ExerciseAnalyzer {
     /// runs — advisory only, but noise the athlete learns to tune out.
     func trackingLost() -> [AnalyzerEvent] {
         sway.reset()
+        // The travel window is only meaningful over a CONTINUOUS observation:
+        // a gap hides exactly the travel it was measuring, and the frames on
+        // either side would be stitched into one bogus range.
+        footPlant.begin()
         return []
     }
 
@@ -656,16 +801,24 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         t.reset()
         orientationWarned = false
         sway.reset()
+        footPlant.begin()
     }
 }
 
 // MARK: - Pull-ups
 
-/// Rear-view pull-up tracker.
+/// Pull-up tracker. FRONT VIEW (and rear — see below).
 ///
-/// Optimised for a camera BEHIND the athlete, so no facial or chin landmark is
-/// ever consulted — from behind they are occluded, and a rep that depends on
-/// them would simply stop counting.
+/// VIEW-DIRECTION AGNOSTIC BY CONSTRUCTION. No facial or chin landmark is ever
+/// consulted: from behind they are occluded, and from the front they add nothing
+/// the shoulders and elbows do not already say. Everything is measured from the
+/// two shoulders, two elbows and two wrists, which are symmetric under a
+/// front/back flip — so the same code serves either framing, and the spec's
+/// front-view requirement needs no separate path.
+///
+/// NO EQUIPMENT IS EVER SEARCHED FOR. The bar is not detected in the image; the
+/// mean WRIST height IS the bar, because hands gripping a bar are static for the
+/// whole set while everything else moves.
 ///
 /// TWO PHASES
 /// ----------
@@ -673,9 +826,11 @@ final class DipsAnalyzer: ExerciseAnalyzer {
 ///    stable, for a full second. Then the bar line locks at the mean wrist
 ///    height and the athlete's arm span is calibrated at the dead hang. This is
 ///    what stops a standing athlete from accumulating reps.
-/// 2. REPS. The top of a rep fires on SHOULDER TRAVEL toward the locked bar
-///    line, measured in units of the athlete's own arm span. The rep completes
+/// 2. REPS. The top fires on a DISJUNCTIVE trigger — elbows closed to 80° OR
+///    the shoulders risen to the bar-proximity threshold — and the rep completes
 ///    on the way back down, when the elbows extend to the dead hang again.
+///    Throughout, the wrists must stay on the locked bar line: breaking away
+///    from it is a jump, and voids the rep.
 final class PullUpAnalyzer: ExerciseAnalyzer {
 
     private let cfg = ExerciseType.pullUp.repThresholds!   // .reps exercise: never nil
@@ -694,8 +849,15 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
     private var isArmed = false
     private var attemptInProgress = false
     private var reachedTop = false
+    /// Set when the wrists broke away from the locked bar line during the rep in
+    /// progress. Latches for the remainder of the attempt: a jump cannot be
+    /// un-jumped by landing back in position before lockout.
+    private var jumpDetected = false
     private var smoothedElbow: CGFloat?
     private let smoothingAlpha: CGFloat = 0.6
+
+    /// Shown when the wrist line breaks away from the bar mid-rep.
+    static let jumpMessage = "Don't jump — hang from the bar and pull with your arms."
 
     /// Horizontal pendulum sway, measured against a baseline frozen at the dead
     /// hang. Advisory only — `SwayMonitor` has no access to the counter or the
@@ -721,7 +883,8 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         guard let j = frame.bilateral else { return [] }
         var events: [AnalyzerEvent] = []
 
-        let elbow = smooth(j.meanElbowAngle)
+        let rawElbow = j.meanElbowAngle
+        let elbow = smooth(rawElbow)
 
         guard let bar = barYLevel, let armSpan = calibratedArmSpan, armSpan > 0 else {
             // The ring sits at zero until there is a bar to measure against —
@@ -748,7 +911,41 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         // Gap from the bar down to the shoulders, in arm-spans. ~1.0 at a dead
         // hang; shrinks as the athlete pulls up.
         let gapInArms = (bar - j.meanShoulderY) / armSpan
-        let isAtTop = gapInArms <= pull.topTriggerArmFraction
+
+        // ====================================================================
+        // DISJUNCTIVE PEAK TRIGGER. The top of a rep fires on EITHER signal.
+        //
+        //   (a) the elbows close to <= 80°, or
+        //   (b) the shoulders rise to the bar-proximity trigger.
+        //
+        // Two independent witnesses to the same event, OR'd rather than AND'd
+        // because they fail on opposite body types — see `PullUpConfig`.
+        //
+        // (b) is measured as 0.525 arm-spans of remaining gap, NOT as the
+        // shoulders literally reaching `barY`. The literal reading is a
+        // muscle-up: at the top of a real chin-over-bar rep the shoulders are
+        // still roughly a third of an arm below the hands, so a `shoulderY >=
+        // barY` gate never fires and the exercise counts zero forever. See
+        // `BilateralJointsTests.testTopOfARealPullUpDoesNotReachTheBarLine`.
+        // ====================================================================
+        let shoulderReachedBar = gapInArms <= pull.topTriggerArmFraction
+        // `isTrustworthyAngle` FIRST. This is a `<=` gate, so the 0 sentinel a
+        // degenerate frame returns would otherwise read as a maximal contraction
+        // and certify a peak that never happened. See PoseGeometry.
+        //
+        // THE RAW ANGLE IS CHECKED TOO, NOT JUST THE SMOOTHED ONE. Guarding only
+        // the filter's output is not enough here: the EMA blends the 0 sentinel
+        // with the preceding good frames, so a single degenerate frame arriving
+        // during a dead hang emits 0.6·0 + 0.4·180 ≈ 72° — a value that is both
+        // "trustworthy" (comfortably above the sentinel) and under the 80° gate.
+        // One broken frame would then certify a peak. Testing the raw reading
+        // closes that, because a degenerate frame is refused entry to the gate
+        // regardless of what the filter is carrying.
+        let elbowsClosed = PoseGeometry.isTrustworthyAngle(rawElbow)
+            && PoseGeometry.isTrustworthyAngle(elbow)
+            && elbow <= pull.peakElbowAngle
+        let isAtTop = elbowsClosed || shoulderReachedBar
+
         let isExtended = elbow >= cfg.lockoutAngle
 
         // Ring progress: 0 at a dead hang, 1 at the trigger height.
@@ -766,7 +963,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         let shoulderMid = CGPoint(x: (j.leftShoulder.x + j.rightShoulder.x) / 2,
                                   y: j.meanShoulderY)
         if sway.observe(shoulderMid, scale: armSpan) {
-            events.append(.coachingCue(.swing))
+            events.append(.coachingCue(.swing, severity: .warning))
         }
 
         // ---- Arm at the dead hang, and recalibrate the arm span there ----
@@ -795,15 +992,43 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
 
         minElbowThisRep = min(minElbowThisRep, elbow)
 
+        // ====================================================================
+        // ANTI-JUMP (scale-invariant). Hands on a real bar do not move: the
+        // shoulders travel and the wrists stay put. An athlete who jumps into
+        // the rep, or pushes off a box or a knee, moves the WHOLE body — so the
+        // wrist line breaks away from the bar line it locked to.
+        //
+        // Measured in fractions of the athlete's own hang length rather than in
+        // screen percentages, so the same number is correct at every camera
+        // distance and on every body. A raw screen percentage would be
+        // simultaneously too strict up close and too lax far away.
+        //
+        // Runs only inside an attempt — i.e. during the upward phase — so
+        // ordinary settling at the dead hang between reps costs nothing.
+        // ====================================================================
+        if !jumpDetected, abs(j.meanWristY - bar) > pull.jumpDriftArmFraction * armSpan {
+            jumpDetected = true
+            transition(to: .invalidRepDetected, sink: &events)
+            events.append(.invalidRep(feedback: Self.jumpMessage, severity: .critical))
+        }
+
         // ---- Top of the rep ----
         if isAtTop {
             reachedTop = true
-            transition(to: .atBottom, sink: &events)   // apex of a pull-up
+            // Suppressed while a jump is on record: the athlete did reach the
+            // top, but not under their own arms, and moving to the apex state
+            // would report progress the rep is not going to be paid for.
+            if !jumpDetected {
+                transition(to: .atBottom, sink: &events)   // apex of a pull-up
+            }
         }
 
         // ---- Descent completes the rep ----
         if isExtended {
-            if reachedTop {
+            if jumpDetected {
+                // Already messaged at the moment of detection; stay silent here
+                // rather than stacking a second complaint onto the same rep.
+            } else if reachedTop {
                 reps += 1
                 lastPeak = minElbowThisRep
                 events.append(.repCompleted(totalCount: reps))
@@ -812,6 +1037,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
             }
             attemptInProgress = false
             reachedTop = false
+            jumpDetected = false
             transition(to: .barLocked, sink: &events)
         }
 
@@ -866,6 +1092,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         isArmed = false
         attemptInProgress = false
         reachedTop = false
+        jumpDetected = false
         sway.reset()
         transition(to: .ready, sink: &sink)
     }
@@ -891,6 +1118,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         zoneReferenceWristY = nil
         attemptInProgress = false
         reachedTop = false
+        jumpDetected = false
         minElbowThisRep = .greatestFiniteMagnitude
         isArmed = false
         sway.reset()
@@ -920,6 +1148,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         isArmed = false
         attemptInProgress = false
         reachedTop = false
+        jumpDetected = false
         smoothedElbow = nil
         minElbowThisRep = .greatestFiniteMagnitude
         lastPeak = nil
