@@ -358,7 +358,18 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         case .barLocked:          return "Hang and pull!"
         case .holding:            return "Hold it!"
         case .descending:         return descendingCue
-        case .atBottom:           return exercise == .pullUp ? "Chin over the bar!" : "Looking good!"
+        // `.atBottom` is the APEX for the two exercises that pull/curl upward.
+        // The pull-up cue used to say "Chin over the bar!", naming a landmark the
+        // tracker deliberately never reads — `BilateralJoints` carries no facial
+        // joints, and a rep is judged on shoulder travel against the locked bar
+        // line. Coaching the athlete toward a cue the machine cannot see invites
+        // them to chase it and wonder why nothing counts.
+        case .atBottom:
+            switch exercise {
+            case .pullUp:   return "Shoulders to the bar!"
+            case .crunches: return "Hold the squeeze!"
+            default:        return "Looking good!"
+            }
         case .ascending:          return ascendingCue
         case .invalidRepDetected: return "Adjust your form"
         case .invalidPosition:    return "Fix your posture!"
@@ -370,9 +381,11 @@ final class WorkoutViewModel: NSObject, ObservableObject {
     /// and for a plank "not in position yet". A flat "Ready!" would be wrong.
     private var readyCue: String {
         switch exercise {
-        case .pullUp: return "Grab the bar"
-        case .plank:  return "Get into position"
-        default:      return "Ready!"
+        case .pullUp:   return "Face the camera, then grab the bar"
+        case .crunches: return "Lie down side-on to the camera"
+        case .dips:     return "Stand side-on to the camera"
+        case .plank:    return "Get into position"
+        default:        return "Ready!"
         }
     }
 

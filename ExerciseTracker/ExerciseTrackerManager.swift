@@ -198,9 +198,11 @@ public final class ExerciseTrackerManager {
     /// Written under `frameGate`; read without it, which is fine for a counter
     /// nothing branches on. Don't promote this to a control signal as-is.
     public private(set) var droppedFrameCount: Int = 0
-    private let speech = AVSpeechSynthesizer()
-    private var lastSpokenAt: [String: Date] = [:]   // debounce repeated feedback
-    private let speechCooldown: TimeInterval = 2.5
+    /// Spoken/tonal coaching. Owns voice selection, the terse fallback for harsh
+    /// legacy voices, TONE-mode chimes, the audio session, and per-phrase
+    /// debouncing — all of which used to be three ad-hoc properties and a
+    /// hand-rolled cooldown here.
+    public let voiceCoach = VoiceCoach()
 
     /// Reused across frames. Building it once is cheaper than per-frame alloc.
     private lazy var poseRequest: VNDetectHumanBodyPoseRequest = {
@@ -596,41 +598,15 @@ public final class ExerciseTrackerManager {
 
     // MARK: Voice feedback
 
-    /// Prepares the audio session, exactly once, the first time we're about to
-    /// speak.
+    /// Speaks a phrase through the coach, unless voice feedback is switched off.
     ///
-    /// Nothing configured `AVAudioSession` before, which left the outcome up to
-    /// whatever category the process happened to have: a coaching cue could stop
-    /// the user's music outright, or not be audible at all. `.duckOthers` is the
-    /// right shape — a cue is a second long and should dip the music, not end it.
-    ///
-    /// Deliberately lazy rather than done in `init`: activating an audio session
-    /// is a claim on a shared resource, and a workout with no form errors never
-    /// needs to make it. `static let` gives us the once-only semantics for free,
-    /// including the thread safety.
-    private static let prepareAudioSession: Void = {
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .voicePrompt,
-                                 options: [.duckOthers, .mixWithOthers])
-        try? session.setActive(true, options: [])
-        #endif
-    }()
-
-    /// Speaks a phrase, debounced so the same message can't spam the user.
+    /// The audio session, voice selection, prosody and per-phrase debouncing all
+    /// live in `VoiceCoach` now. This used to build an `AVSpeechUtterance` here
+    /// with the default rate and a bare `en-US` voice, which meant taking
+    /// whatever the system handed back — often a compact legacy voice — and
+    /// reading full sentences through it at a flat, robotic cadence.
     private func speak(_ phrase: String) {
         guard isVoiceFeedbackEnabled else { return }
-        let now = Date()
-        if let last = lastSpokenAt[phrase], now.timeIntervalSince(last) < speechCooldown {
-            return
-        }
-        lastSpokenAt[phrase] = now
-
-        _ = Self.prepareAudioSession
-
-        let utterance = AVSpeechUtterance(string: phrase)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        speech.speak(utterance)
+        voiceCoach.say(phrase)
     }
 }
