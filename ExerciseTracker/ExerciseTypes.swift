@@ -407,9 +407,20 @@ struct CrunchConfig {
     /// them through the ±5% again would drag the two gates toward each other and
     /// collapse the hysteresis band, which is the exact failure `Tolerance`'s own
     /// documentation warns about.
+    /// UNVALIDATED ON DEVICE. Both angles are derived from the spec's stated
+    /// shoulder-travel equivalence and checked against synthetic fixtures — no
+    /// filmed crunch has ever exercised them. Re-tune before release.
+    ///
+    /// `peakHipAngle` is 116, NOT the tighter 112 first written here. The
+    /// derivation above lands a spec-conformant rep at ≈115.9°, so a 112° gate
+    /// sat about 4° INSIDE the movement the spec describes: an athlete doing
+    /// exactly what was asked scored zero. The hysteresis band is preserved by
+    /// lowering `lyingHipAngle` to 126 instead, which is the correct direction —
+    /// the band must be carved out of the rest position, where there is slack,
+    /// not out of the pass criterion, where there is none.
     static let standard = CrunchConfig(
-        lyingHipAngle:            128,
-        peakHipAngle:             112,
+        lyingHipAngle:            126,
+        peakHipAngle:             116,
         maxHipDriftThighFraction: 0.30,
         minConfidence:            0.4
     )

@@ -235,6 +235,7 @@ final class SwayReportingTests: XCTestCase {
     private func sawWarning(_ events: [AnalyzerEvent]) -> Bool {
         events.contains { e in
             if case .invalidRep(_, let severity) = e { return severity == .warning }
+            if case .coachingCue = e { return true }
             return false
         }
     }

@@ -567,6 +567,14 @@ public final class ExerciseTrackerManager {
                                           severity: severity)
                 speak(feedback)
 
+            case .coachingCue(let cue):
+                // Advisory only. The delegate gets the same wording the athlete
+                // hears, and `say(_: VoiceCue)` — unlike the String overload —
+                // honours the terse fallback and TONE mode.
+                delegate?.exerciseTracker(self, didDetectInvalidRep: voiceCoach.phrase(for: cue),
+                                          severity: .warning)
+                if isVoiceFeedbackEnabled { voiceCoach.say(cue) }
+
             case .depthProgress(let progress):
                 delegate?.exerciseTracker(self, didUpdateDepth: progress)
 

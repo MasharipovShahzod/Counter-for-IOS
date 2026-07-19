@@ -184,6 +184,14 @@ public final class VoiceCoach {
         return u
     }
 
+    /// The text form of a cue under the current fidelity — full sentence on a
+    /// neural voice, one soft word on a legacy one. Exposed so callers that also
+    /// need to DISPLAY the cue (the delegate's on-screen warning) show the same
+    /// wording the athlete hears, rather than the two drifting apart.
+    public func phrase(for cue: VoiceCue) -> String {
+        isTerse ? cue.tersePhrase : cue.defaultPhrase
+    }
+
     /// Delivers a cue through whichever channel the current mode selects.
     public func say(_ cue: VoiceCue) {
         switch mode {

@@ -36,6 +36,22 @@ enum AnalyzerEvent {
     case stateChanged(RepState)
     case repCompleted(totalCount: Int)
     case invalidRep(feedback: String, severity: FormSeverity)
+    /// An advisory coaching cue, carried as a `VoiceCue` rather than a
+    /// pre-rendered string.
+    ///
+    /// WHY THIS ISN'T JUST AN `invalidRep`
+    /// -----------------------------------
+    /// `invalidRep` carries a `String`, and a string has already lost the
+    /// information the voice engine needs: whether to speak the full sentence,
+    /// shorten it to one word on a harsh legacy voice, or play a chime instead.
+    /// Emitting `VoiceCue.swing.defaultPhrase` fed the full sentence through the
+    /// String path, so the terse fallback and TONE mode — both required by the
+    /// spec — could never engage. Passing the cue itself keeps that choice open
+    /// until the moment of delivery.
+    ///
+    /// Always advisory: the manager renders it at `.warning` severity and it
+    /// never touches a rep count.
+    case coachingCue(VoiceCue)
     /// Normalized rep depth, 0 (top / lockout) → 1 (target depth reached).
     /// Emitted every analyzed frame to drive the live depth progress ring.
     case depthProgress(Double)
@@ -565,8 +581,7 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         // where the rep actually started. Normalized against the upper arm.
         // Nothing in this block touches the counter or the FSM state.
         if sway.observe(joints.shoulder, scale: joints.upperArmLength) {
-            events.append(.invalidRep(feedback: VoiceCue.swing.defaultPhrase,
-                                      severity: .warning))
+            events.append(.coachingCue(.swing))
         }
 
         // ---- Arm at the top: arms extended, 165–180° ----
@@ -616,6 +631,19 @@ final class DipsAnalyzer: ExerciseAnalyzer {
         }
 
         return events
+    }
+
+    /// Drops the frozen sway baseline when the body leaves view.
+    ///
+    /// Without this, `DipsAnalyzer` used the protocol's default no-op and kept a
+    /// baseline frozen at wherever the athlete stood before the gap. Stepping
+    /// away and returning a few inches to one side then read as drift and
+    /// nagged "Keep your body steady" on a clean rep. The same applies to an
+    /// abandoned rep that never returns to lockout, so `endActivePhase()` never
+    /// runs — advisory only, but noise the athlete learns to tune out.
+    func trackingLost() -> [AnalyzerEvent] {
+        sway.reset()
+        return []
     }
 
     func reset() {
@@ -732,8 +760,7 @@ final class PullUpAnalyzer: ExerciseAnalyzer {
         let shoulderMid = CGPoint(x: (j.leftShoulder.x + j.rightShoulder.x) / 2,
                                   y: j.meanShoulderY)
         if sway.observe(shoulderMid, scale: armSpan) {
-            events.append(.invalidRep(feedback: VoiceCue.swing.defaultPhrase,
-                                      severity: .warning))
+            events.append(.coachingCue(.swing))
         }
 
         // ---- Arm at the dead hang, and recalibrate the arm span there ----

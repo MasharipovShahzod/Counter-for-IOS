@@ -49,12 +49,20 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
     private var minHipThisRep: CGFloat = .greatestFiniteMagnitude
     private var lastPeak: CGFloat?
 
-    // Per-joint coordinate filters. Tuned for normalized coordinates at 30fps:
-    // beta is well above the 1€ default because a crunch's shoulder travel is
-    // fast relative to its amplitude, and lag there is what loses the peak.
-    private var shoulderFilter = OneEuroPointFilter(minCutoff: 1.2, beta: 0.35)
-    private var hipFilter      = OneEuroPointFilter(minCutoff: 1.2, beta: 0.35)
-    private var kneeFilter     = OneEuroPointFilter(minCutoff: 1.2, beta: 0.35)
+    // Per-joint coordinate filters.
+    //
+    // BETA IS SCALED FOR NORMALIZED COORDINATES, and that is why it looks huge
+    // next to published 1€ values. Those assume pixel- or degree-scale signals
+    // moving at hundreds of units per second. Here the whole image is 1.0 wide,
+    // so a crunch shoulder travels ~0.13 units in ~0.4s — about 0.33 units/s.
+    // At the 1€ default beta the adaptive term would contribute under 9% of the
+    // cutoff, leaving a fixed ~157ms lag: worse than the EMA this design
+    // rejected for costing ~100ms and finding the peak late.
+    //
+    // UNVALIDATED ON DEVICE — tuned against synthetic fixtures only.
+    private var shoulderFilter = OneEuroPointFilter(minCutoff: 1.2, beta: 10)
+    private var hipFilter      = OneEuroPointFilter(minCutoff: 1.2, beta: 10)
+    private var kneeFilter     = OneEuroPointFilter(minCutoff: 1.2, beta: 10)
 
     /// Measures physical hip sliding against a baseline frozen the moment the
     /// ascent begins. Non-blocking by construction — see `SwayMonitor`.
@@ -66,9 +74,24 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
 
     func analyze(frame: PoseFrame) -> [AnalyzerEvent] {
         guard let raw = frame.unilateral else { return [] }
-        guard raw.minConfidence >= cfg.minConfidence else { return [] }
 
         var events: [AnalyzerEvent] = []
+
+        // ---- Confidence floor ----
+        // This analyzer wants 0.4 while `BodyJoints.make` admits frames at the
+        // tracker's global 0.3, so frames in [0.3, 0.4) arrive here and must be
+        // declined. Returning `[]` was wrong: the manager treats an empty event
+        // list as "nothing happened", NOT as tracking loss, so the ring froze at
+        // its last value and the athlete stared at a stale HUD with no
+        // explanation. A lying athlete self-occludes badly, so this band is hit
+        // routinely rather than rarely.
+        //
+        // `PlankAnalyzer` already learned this exact lesson — it keeps emitting
+        // progress on invalid frames for the same reason.
+        guard raw.minConfidence >= cfg.minConfidence else {
+            events.append(.depthProgress(0))
+            return events
+        }
 
         // ---- Filtered coordinates, straight into the gates ----
         let shoulder = shoulderFilter.apply(raw.shoulder, at: frame.time)
@@ -95,8 +118,7 @@ final class CrunchAnalyzer: ExerciseAnalyzer {
         // where the hip actually was. The cue is advisory: note that nothing in
         // this block touches `reps`, `reachedPeak`, or `currentState`.
         if sway.observe(hip, scale: thigh) {
-            events.append(.invalidRep(feedback: VoiceCue.swing.defaultPhrase,
-                                      severity: .warning))
+            events.append(.coachingCue(.swing))
         }
 
         // ---- Lying: arm the machine and close any attempt in flight ----
