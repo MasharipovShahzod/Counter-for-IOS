@@ -36,17 +36,55 @@ final class DipsAnalyzerTests: XCTestCase {
         XCTAssertEqual(a.successfulReps, 1, "165–180 must all count as 'extended'")
     }
 
-    /// The spec's stated bottom: 90° or less, relaxed to 98°.
-    func testBottomPhaseAcceptsTheToleratedDepth() {
+    /// SOFT DEPTH. The spec's stated bottom is 105°, deliberately not a strict
+    /// 90°: the descent phase opens as soon as the elbow closes that far.
+    func testBottomPhaseAcceptsTheSoftDepth() {
         let cfg = ExerciseType.dips.repThresholds!
-        XCTAssertEqual(cfg.depthAngle, 98, accuracy: 0.0001)
+        XCTAssertEqual(cfg.depthAngle, 105, accuracy: 0.0001)
 
         let a = DipsAnalyzer()
         feed(a, Pose.dips(elbow: 175))
-        feed(a, Pose.dips(elbow: 97))    // deeper than 98 but shallower than 90 — inside the relaxed gate
+        feed(a, Pose.dips(elbow: 104))   // inside the soft gate, nowhere near 90°
         let events = feed(a, Pose.dips(elbow: 175))
-        XCTAssertEqual(a.successfulReps, 1, "the relaxed 98° gate must accept 97°")
+        XCTAssertEqual(a.successfulReps, 1, "the soft 105° gate must accept 104°")
         XCTAssertTrue(events.invalidFeedback.isEmpty)
+    }
+
+    /// The boundary, from both sides.
+    ///
+    /// WHY THIS DOES NOT FEED EXACTLY 105°. The analyzer low-pass filters the
+    /// elbow angle, and an EMA approaches its target ASYMPTOTICALLY: descending
+    /// from 175° toward 105° it emits 105 + 70·0.4ⁿ, which is always a hair
+    /// ABOVE 105 and so never satisfies a `<= 105` gate no matter how many
+    /// frames are fed. Asserting "105° exactly counts" therefore tests the
+    /// smoother's residual, not the gate — it failed on CI for precisely that
+    /// reason. The gate's inclusivity is pinned on the constant instead, and the
+    /// behavioural check uses a margin comfortably larger than the residual.
+    func testSoftDepthGateBoundary() {
+        XCTAssertEqual(ExerciseType.dips.repThresholds!.depthAngle, 105, accuracy: 0.0001)
+
+        let inside = DipsAnalyzer()
+        feed(inside, Pose.dips(elbow: 175))
+        feed(inside, Pose.dips(elbow: 104.9))
+        feed(inside, Pose.dips(elbow: 175))
+        XCTAssertEqual(inside.successfulReps, 1, "just inside the gate must count")
+
+        let outside = DipsAnalyzer()
+        feed(outside, Pose.dips(elbow: 175))
+        feed(outside, Pose.dips(elbow: 106))
+        feed(outside, Pose.dips(elbow: 175))
+        XCTAssertEqual(outside.successfulReps, 0, "just outside the gate must not count")
+    }
+
+    /// A dip that stops at 110° used to be credited under a hypothetical looser
+    /// gate and must not be: 105 is a relaxation, not an abolition.
+    func testDepthGateStillRejectsAShallowDip() {
+        let a = DipsAnalyzer()
+        feed(a, Pose.dips(elbow: 175))
+        feed(a, Pose.dips(elbow: 110))
+        let events = feed(a, Pose.dips(elbow: 175))
+        XCTAssertEqual(a.successfulReps, 0)
+        XCTAssertTrue(events.invalidFeedback.contains { $0.contains("Dip lower") })
     }
 
     func testShallowDipIsRejected() {

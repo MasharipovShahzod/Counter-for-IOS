@@ -41,26 +41,36 @@ public enum VoiceCue: String, CaseIterable {
     case posture
     /// A rep was credited.
     case goodRep
+    /// The feet were carrying the body — a dip performed with the feet planted
+    /// on the floor. Unlike `.swing` this one VOIDS the rep; it is emitted at
+    /// `.critical` severity.
+    case grounded
 
     /// Full natural sentence, used with a high-fidelity voice.
     public var defaultPhrase: String {
         switch self {
-        case .swing:   return "Keep your body steady."
-        case .higher:  return "Try to come up a little higher."
-        case .lower:   return "Go a little deeper on the next one."
-        case .posture: return "Straighten up and keep your body aligned."
-        case .goodRep: return "Nice rep."
+        case .swing:    return "Keep your body steady."
+        case .higher:   return "Try to come up a little higher."
+        case .lower:    return "Go a little deeper on the next one."
+        case .posture:  return "Straighten up and keep your body aligned."
+        case .goodRep:  return "Nice rep."
+        case .grounded: return "Lift your feet — let your arms take the weight."
         }
     }
 
     /// Single soft word, used when the system fell back to a harsh legacy voice.
     public var tersePhrase: String {
         switch self {
-        case .swing:   return "Steady"
-        case .higher:  return "Higher"
-        case .lower:   return "Deeper"
-        case .posture: return "Align"
-        case .goodRep: return "Good"
+        case .swing:    return "Steady"
+        case .higher:   return "Higher"
+        case .lower:    return "Deeper"
+        case .posture:  return "Align"
+        case .goodRep:  return "Good"
+        // One word, per the terse contract — "Feet up" reads naturally but is
+        // two, and `testTersePhrasesAreSingleWords` exists to keep sentences
+        // from creeping into the fallback. "Hang" is the gym cue for exactly
+        // this fault: let the arms take the weight.
+        case .grounded: return "Hang"
         }
     }
 
@@ -68,11 +78,14 @@ public enum VoiceCue: String, CaseIterable {
     /// — no bundled audio assets, so nothing to ship or fail to load.
     public var systemSoundID: UInt32 {
         switch self {
-        case .swing:   return 1103
-        case .higher:  return 1113
-        case .lower:   return 1114
-        case .posture: return 1073
-        case .goodRep: return 1057
+        case .swing:    return 1103
+        case .higher:   return 1113
+        case .lower:    return 1114
+        case .posture:  return 1073
+        case .goodRep:  return 1057
+        // Shares the posture chime: both are hard faults that void a rep, and a
+        // sixth distinct tone is one more than an athlete can tell apart mid-set.
+        case .grounded: return 1073
         }
     }
 }

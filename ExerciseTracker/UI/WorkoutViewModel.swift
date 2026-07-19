@@ -282,7 +282,13 @@ final class WorkoutViewModel: NSObject, ObservableObject {
 
     private func configureSession() {
         session.beginConfiguration()
-        session.sessionPreset = .high
+
+        // Preview and analysis get DIFFERENT resolutions, split by device tier —
+        // 1080p/720p for the preview, 720p/540p for Vision. `.high` used to set
+        // both, which handed the analyser a full-size buffer on every frame for
+        // no accuracy gain. See `CaptureConfiguration`.
+        let tier = DeviceCompatibility.performanceTier
+        CaptureConfiguration.applyPreviewPreset(to: session, tier: tier)
 
         let position: AVCaptureDevice.Position = usingFrontCamera ? .front : .back
         if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
@@ -294,7 +300,12 @@ final class WorkoutViewModel: NSObject, ObservableObject {
         let output = AVCaptureVideoDataOutput()
         output.alwaysDiscardsLateVideoFrames = true   // always analyze the freshest frame
         output.setSampleBufferDelegate(self, queue: sampleQueue)
-        if session.canAddOutput(output) { session.addOutput(output) }
+        if session.canAddOutput(output) {
+            session.addOutput(output)
+            // After `addOutput`: the output must belong to the session before
+            // its video settings can be negotiated.
+            CaptureConfiguration.applyAnalysisResolution(to: output, tier: tier)
+        }
 
         session.commitConfiguration()
         isConfigured = true

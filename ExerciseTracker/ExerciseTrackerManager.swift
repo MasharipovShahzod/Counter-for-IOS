@@ -569,12 +569,14 @@ public final class ExerciseTrackerManager {
                                           severity: severity)
                 speak(feedback)
 
-            case .coachingCue(let cue):
-                // Advisory only. The delegate gets the same wording the athlete
-                // hears, and `say(_: VoiceCue)` — unlike the String overload —
-                // honours the terse fallback and TONE mode.
+            case .coachingCue(let cue, let severity):
+                // The delegate gets the same wording the athlete hears, and
+                // `say(_: VoiceCue)` — unlike the String overload — honours the
+                // terse fallback and TONE mode. Severity now comes FROM the
+                // event: most cues are advisory, but `.grounded` is a rep-voiding
+                // anti-cheat fault and must render as one.
                 delegate?.exerciseTracker(self, didDetectInvalidRep: voiceCoach.phrase(for: cue),
-                                          severity: .warning)
+                                          severity: severity)
                 if isVoiceFeedbackEnabled { voiceCoach.say(cue) }
 
             case .depthProgress(let progress):

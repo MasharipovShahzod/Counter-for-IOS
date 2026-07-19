@@ -163,13 +163,16 @@ final class ExerciseThresholdsTests: XCTestCase {
                       "the exercise that USES this check must have a real bound")
     }
 
-    /// Spec §4: dips top relaxes from a locked 180° to 165°, and the bottom from
-    /// a punishing 90° to 98°. Both are stated as EFFECTIVE (post-tolerance)
-    /// bounds, so the nominal declarations are pre-divided by the tolerance.
+    /// Spec §4: dips top relaxes from a locked 180° to 165°, and the bottom to a
+    /// SOFT 105° — explicitly not the strict 90°. Both are stated as EFFECTIVE
+    /// (post-tolerance) bounds, so the nominal declarations are pre-divided by
+    /// the tolerance.
     func testDipsUseTheRelaxedSpecBounds() {
         let t = ExerciseType.dips.repThresholds!
         XCTAssertEqual(t.lockoutAngle, 165, accuracy: 0.5)
-        XCTAssertEqual(t.depthAngle, 98, accuracy: 0.5)
+        XCTAssertEqual(t.depthAngle, 105, accuracy: 0.5)
+        XCTAssertGreaterThan(t.depthAngle, 90,
+                             "the spec asks for soft depth; a 90° gate is the thing it replaces")
     }
 
     /// Spec §4: the pull-up dead hang relaxes from a strict 180° to 160°, so an
